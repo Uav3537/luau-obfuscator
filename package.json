@@ -1,6 +1,6 @@
 {
   "name": "luau-obfuscator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "luau obfuscator for roblox",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
