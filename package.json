@@ -1,0 +1,38 @@
+{
+  "name": "luau-obfuscator",
+  "version": "1.0.0",
+  "description": "luau obfuscator for roblox",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Uav3537/luau-obfuscator.git"
+  },
+  "exports": {
+    ".": {
+      "types": {
+        "require": "./dist/index.d.cts",
+        "import": "./dist/index.d.ts"
+      },
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "test": "node scripts/test.js",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.0.4"
+  },
+  "dependencies": {
+    "luau-parser": "^1.0.3"
+  }
+}
