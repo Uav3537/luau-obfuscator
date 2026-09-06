@@ -24,12 +24,12 @@ function markRuntimeNumbersAsStructural(body: { statements: Statement[] }): void
 
 export interface VmifyOptions {
     /**
-     * VM 밖에서 값을 그대로 참조해야 하는 전역 이름 목록(GETGLOBAL/SETGLOBAL 대상).
-     * Luau엔 getfenv가 없어서 "임의의 전역 읽기"를 흉내낼 수 없기 때문에,
-     * 여기 나열된 이름들만 브리지 테이블에 실제 값으로 미리 채워 넣는다.
-     * 나열되지 않은 전역을 참조하면 컴파일은 되지만 런타임에 nil이 나온다 — 실사용 전
-     * 반드시 프로그램에서 실제로 쓰는 전역 이름을 전부 이 목록에 채워야 함(TODO: 컴파일러가
-     * ScopeAnalysis.globalsByName을 이용해 자동으로 목록을 뽑아주도록 개선 가능).
+     * 스코프 분석에 미리 등록해둘 전역 이름 시드 목록. 여기 없는 이름이라도 프로그램에서
+     * 실제로 참조되면(로컬/파라미터/업밸류로 안 풀리는 식별자는 전부) 스코프 분석이
+     * 자동으로 전역으로 잡아내므로, 브릿지 테이블은 이 옵션이 아니라
+     * VmCompiler.getUsedGlobalNames()(실제 사용된 전역 전체)로 만든다 — 옛날엔 이 목록에
+     * 없는 이름을 쓰면 컴파일은 되는데 GETGLOBAL이 조용히 nil을 반환해서
+     * "attempt to call a nil value"로 터졌었음.
      */
     builtinGlobals?: readonly string[]
     /**
@@ -56,17 +56,22 @@ export interface VmifyOptions {
  * 사라지므로, 이후 패스(RenameVariables, EncryptStrings 등)가 손댈 원본 AST가 없다.
  */
 export function runVmify(program: Program, options: VmifyOptions): void {
-    const globalNames = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS
+    const builtinGlobals = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS
     const random = options.random ?? Math.random
 
     const opcodeMap = createOpcodeMap(random)
     const names = generateVmNames(random)
 
-    const compiler = new VmCompiler(program, globalNames, opcodeMap)
+    const compiler = new VmCompiler(program, builtinGlobals, opcodeMap)
     const topProto = compiler.compile()
 
+    // builtinGlobals(시드 목록)가 아니라 실제로 프로그램이 참조한 전역 전체로 브릿지를
+    // 만든다 — game/task 같은 시드 목록에 없는 Roblox API나 실행기 전역을 스크립트가
+    // 쓰더라도 스코프 분석이 이미 전역으로 잡아뒀으므로 여기서 다 커버된다.
+    const usedGlobalNames = compiler.getUsedGlobalNames()
+
     const globalsTable = table(
-        globalNames.map((name) => namedField(name, identifier(name))),
+        usedGlobalNames.map((name) => namedField(name, identifier(name))),
     )
 
     const runtimeSource = buildVmRuntimeSource(names, opcodeMap)

@@ -594,7 +594,7 @@ function splitByteChunks(bytes, min, max) {
   return chunks.length > 0 ? chunks : [bytes];
 }
 function stringCharCall(bytes) {
-  return call(member(identifier("string"), "char"), bytes.map(numberLiteral));
+  return call(member(identifier("string"), "char"), bytes.map(vmNumberLiteral));
 }
 function buildConcatChain(chunks) {
   function build(lo, hi) {
@@ -625,7 +625,7 @@ function buildShuffledTables(chunks) {
   for (let slot = 0; slot < n; slot++) {
     order[storageOrder[slot]] = slot + 1;
   }
-  const orderFields = order.map((slot) => positionalField(numberLiteral(slot)));
+  const orderFields = order.map((slot) => positionalField(vmNumberLiteral(slot)));
   return {
     storeVar,
     orderVar,
@@ -644,7 +644,7 @@ function buildForLoopStringExpr(chunks) {
     localStatement(accVar, stringLiteral("")),
     numericForStatement(
       iVar,
-      numberLiteral(1),
+      vmNumberLiteral(1),
       unary("#", identifier(orderVar)),
       block([
         assignmentStatement(
@@ -676,7 +676,7 @@ function buildRecursiveStringExpr(chunks) {
     ]),
     returnStatement([
       call(identifier(recName), [
-        binary("+", identifier(iParam), numberLiteral(1)),
+        binary("+", identifier(iParam), vmNumberLiteral(1)),
         binary(
           "..",
           identifier(accParam),
@@ -688,7 +688,7 @@ function buildRecursiveStringExpr(chunks) {
   return iife([
     ...stmts,
     localFunctionStatement(recName, functionBody([functionParam(iParam), functionParam(accParam)], body)),
-    returnStatement([call(identifier(recName), [numberLiteral(1), stringLiteral("")])])
+    returnStatement([call(identifier(recName), [vmNumberLiteral(1), stringLiteral("")])])
   ]);
 }
 function pickControlFlowStrategy() {
@@ -1783,6 +1783,23 @@ var VmCompiler = class {
   captured = /* @__PURE__ */ new Set();
   protoIdCounter = 0;
   declToBinding = /* @__PURE__ */ new Map();
+  /**
+   * 실제로 프로그램이 참조하는 모든 전역 이름(사전 등록된 builtinGlobals +
+   * 스코프 분석이 자동으로 찾아낸, 로컬/파라미터/업밸류로 안 풀리는 나머지 식별자
+   * 전부)을 돌려준다. Vmify.ts가 이 목록으로 브릿지 테이블(globals)을 만든다.
+   *
+   * 예전엔 호출자가 넘긴 builtinGlobals 목록만 브릿지에 넣었는데, 그 목록에
+   * 없는 전역(예: Roblox API나 실행기 전용 전역을 다 못 채운 경우)을 참조하면
+   * 컴파일은 성공하지만 GETGLOBAL이 조용히 nil을 반환해서 "attempt to call a
+   * nil value"로 터진다 — 게다가 원인이 VM 디스패치 쪽 스택에서만 보여서
+   * "opcode 매핑이 깨졌나?" 하고 엉뚱한 곳을 의심하게 만든다. analyzeScopes는
+   * 어차피 로컬/업밸류로 못 푸는 식별자를 전부 global 바인딩으로 잡아두므로,
+   * builtinGlobals에 없던 이름도 여기 globalsByName에는 다 들어있다 —
+   * 하드코딩된 허용목록 대신 이걸 그대로 쓰면 커버리지 문제 자체가 사라진다.
+   */
+  getUsedGlobalNames() {
+    return Array.from(this.analysis.globalsByName.keys());
+  }
   computeCaptured() {
     for (const binding of this.analysis.bindings.values()) {
       if (binding.kind === "global") continue;
@@ -3101,14 +3118,15 @@ function markRuntimeNumbersAsStructural(body) {
   });
 }
 function runVmify(program, options) {
-  const globalNames = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS;
+  const builtinGlobals = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS;
   const random = options.random ?? Math.random;
   const opcodeMap = createOpcodeMap(random);
   const names = generateVmNames(random);
-  const compiler = new VmCompiler(program, globalNames, opcodeMap);
+  const compiler = new VmCompiler(program, builtinGlobals, opcodeMap);
   const topProto = compiler.compile();
+  const usedGlobalNames = compiler.getUsedGlobalNames();
   const globalsTable = table(
-    globalNames.map((name) => namedField(name, identifier(name)))
+    usedGlobalNames.map((name) => namedField(name, identifier(name)))
   );
   const runtimeSource = buildVmRuntimeSource(names, opcodeMap);
   const runtimeProgram = import_luau_parser4.luauparser.parse(runtimeSource);

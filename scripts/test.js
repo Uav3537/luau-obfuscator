@@ -15,10 +15,8 @@ for(const filename of fs.readdirSync(smokedir)) {
     const timeStart = performance.now()
     const obfuscated = obfuscate(content, {
         Minify: {active: false},
-        NumbersToExpressions: {active: false},
-        StringsToExpressions: {active: false}
     })
     const timeEnd = performance.now()
     fs.writeFileSync(path.join(GENERATE_DIR, `${filename}`), obfuscated)
-    console.log(`obfuscating ${filename} took ${(timeEnd - timeStart) / 1000}s, length: ${content.length} -> ${obfuscated.length}`)
+    console.log(`obfuscating ${filename} took ${(timeEnd - timeStart) / 1000}s, length: ${content.length} -> ${obfuscated.length} (x${obfuscated.length / content.length})`)
 }

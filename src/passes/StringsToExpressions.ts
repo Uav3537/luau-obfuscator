@@ -1,7 +1,7 @@
 import type { Program, Expression, Statement } from "luau-parser"
 import { transformExpressions } from "./walk"
 import {
-    numberLiteral, binary, call, member, identifier, table, positionalField, index,
+    vmNumberLiteral, binary, call, member, identifier, table, positionalField, index,
     localStatement, localFunctionStatement, functionParam, functionBody, functionExpression,
     block, ifStatement, ifClause, returnStatement, paren, unary, stringLiteral,
     numericForStatement, assignmentStatement,
@@ -50,7 +50,7 @@ function splitByteChunks(bytes: number[], min: number, max: number): number[][] 
 
 function stringCharCall(bytes: number[]): Expression {
     // string.char(b1, b2, ...) — 원문 텍스트가 소스에 전혀 남지 않음
-    return call(member(identifier("string"), "char"), bytes.map(numberLiteral))
+    return call(member(identifier("string"), "char"), bytes.map(vmNumberLiteral))
 }
 
 /**
@@ -107,7 +107,7 @@ function buildShuffledTables(chunks: number[][]): { storeVar: string; orderVar: 
     for (let slot = 0; slot < n; slot++) {
         order[storageOrder[slot]] = slot + 1
     }
-    const orderFields = order.map((slot) => positionalField(numberLiteral(slot)))
+    const orderFields = order.map((slot) => positionalField(vmNumberLiteral(slot)))
 
     return {
         storeVar,
@@ -140,7 +140,7 @@ function buildForLoopStringExpr(chunks: number[][]): Expression {
         localStatement(accVar, stringLiteral("")),
         numericForStatement(
             iVar,
-            numberLiteral(1),
+            vmNumberLiteral(1),
             unary("#", identifier(orderVar)),
             block([
                 assignmentStatement(
@@ -187,7 +187,7 @@ function buildRecursiveStringExpr(chunks: number[][]): Expression {
         ]),
         returnStatement([
             call(identifier(recName), [
-                binary("+", identifier(iParam), numberLiteral(1)),
+                binary("+", identifier(iParam), vmNumberLiteral(1)),
                 binary(
                     "..",
                     identifier(accParam),
@@ -200,7 +200,7 @@ function buildRecursiveStringExpr(chunks: number[][]): Expression {
     return iife([
         ...stmts,
         localFunctionStatement(recName, functionBody([functionParam(iParam), functionParam(accParam)], body)),
-        returnStatement([call(identifier(recName), [numberLiteral(1), stringLiteral("")])]),
+        returnStatement([call(identifier(recName), [vmNumberLiteral(1), stringLiteral("")])]),
     ])
 }
 
