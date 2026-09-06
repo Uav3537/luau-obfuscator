@@ -27,6 +27,25 @@ export function numberLiteral(value: number): NumberLiteral {
     return { type: "NumberLiteral", value, raw: String(value), line: POS, column: POS }
 }
 
+/**
+ * Vmify가 인스트럭션 op/a/b/c, numParams, maxRegs 같은 "VM 구조 메타데이터"용으로
+ * 찍어내는 숫자는 이 표시를 달아 만든다. 이런 값은 원본 소스에 쓰인 상수가 아니라
+ * Vmify 자신이 만들어낸, 개수가 코드 크기에 비례해 수천~수만 개까지 불어날 수 있는
+ * 내부 값이고, 로직 자체는 이미 Vmify 컴파일로 구조적으로 숨겨져 있다.
+ * NumbersToExpressions/EncryptNumbers 같은 뒤쪽 패스가 이 값들까지 하나하나
+ * for-loop/재귀 함수/디코더 호출로 부풀리면, 두 패스가 곱셈적으로 상호작용해
+ * 출력이 기하급수적으로 커진다 (실측: 4400줄 샘플에서 Vmify+NumbersToExpressions만
+ * 켜면 0.9MB가 아니라 7.7MB가 나옴). 그래서 이 표시가 붙은 노드는 뒤쪽 숫자
+ * 난독화 패스들이 건드리지 않고 그대로 둔다.
+ */
+export const vmStructuralNumbers = new WeakSet<NumberLiteral>()
+
+export function vmNumberLiteral(value: number): NumberLiteral {
+    const node = numberLiteral(value)
+    vmStructuralNumbers.add(node)
+    return node
+}
+
 export function binary(
     operator: BinaryExpression["operator"],
     left: Expression,

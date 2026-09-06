@@ -10,79 +10,177 @@ function visitArray(arr: Expression[], visitor: ExpressionVisitor): void {
     }
 }
 
-export function mapExpression(expr: Expression, visitor: ExpressionVisitor): Expression {
+interface ChildAccessor {
+    get(): Expression
+    set(v: Expression): void
+}
+
+/**
+ * expr의 "자식 Expression"들에 대한 getter/setter 목록을 반환한다.
+ * (FunctionExpression은 별도 처리하므로 여기서는 빈 배열을 반환한다.)
+ */
+function getExpressionChildren(expr: Expression): ChildAccessor[] {
     switch (expr.type) {
-        case "InterpolatedStringExpression":
+        case "InterpolatedStringExpression": {
+            const children: ChildAccessor[] = []
             for (const part of expr.parts) {
                 if (part.kind === "expression") {
-                    part.expression = mapExpression(part.expression, visitor)
+                    children.push({
+                        get: () => part.expression,
+                        set: (v) => { part.expression = v },
+                    })
                 }
             }
-            break
+            return children
+        }
 
         case "FunctionExpression":
-            walkFunctionBody(expr.func, visitor)
-            break
+            return []
 
-        case "TableExpression":
+        case "TableExpression": {
+            const children: ChildAccessor[] = []
             for (const field of expr.fields) {
                 if (field.type === "TableFieldPositional") {
-                    field.value = mapExpression(field.value, visitor)
+                    children.push({ get: () => field.value, set: (v) => { field.value = v } })
                 } else if (field.type === "TableFieldNamed") {
-                    field.value = mapExpression(field.value, visitor)
+                    children.push({ get: () => field.value, set: (v) => { field.value = v } })
                 } else if (field.type === "TableFieldComputed") {
-                    field.key = mapExpression(field.key, visitor)
-                    field.value = mapExpression(field.value, visitor)
+                    children.push({ get: () => field.key, set: (v) => { field.key = v } })
+                    children.push({ get: () => field.value, set: (v) => { field.value = v } })
                 }
             }
-            break
+            return children
+        }
 
         case "BinaryExpression":
-            expr.left = mapExpression(expr.left, visitor)
-            expr.right = mapExpression(expr.right, visitor)
-            break
+            return [
+                { get: () => expr.left, set: (v) => { expr.left = v } },
+                { get: () => expr.right, set: (v) => { expr.right = v } },
+            ]
 
         case "UnaryExpression":
-            expr.argument = mapExpression(expr.argument, visitor)
-            break
+            return [{ get: () => expr.argument, set: (v) => { expr.argument = v } }]
 
         case "MemberExpression":
-            expr.object = mapExpression(expr.object, visitor)
-            break
+            return [{ get: () => expr.object, set: (v) => { expr.object = v } }]
 
         case "IndexExpression":
-            expr.object = mapExpression(expr.object, visitor)
-            expr.index = mapExpression(expr.index, visitor)
-            break
+            return [
+                { get: () => expr.object, set: (v) => { expr.object = v } },
+                { get: () => expr.index, set: (v) => { expr.index = v } },
+            ]
 
-        case "CallExpression":
-            expr.callee = mapExpression(expr.callee, visitor)
-            visitArray(expr.arguments, visitor)
-            break
+        case "CallExpression": {
+            const children: ChildAccessor[] = [
+                { get: () => expr.callee, set: (v) => { expr.callee = v } },
+            ]
+            for (let i = 0; i < expr.arguments.length; i++) {
+                const idx = i
+                children.push({
+                    get: () => expr.arguments[idx],
+                    set: (v) => { expr.arguments[idx] = v },
+                })
+            }
+            return children
+        }
 
-        case "MethodCallExpression":
-            expr.object = mapExpression(expr.object, visitor)
-            visitArray(expr.arguments, visitor)
-            break
+        case "MethodCallExpression": {
+            const children: ChildAccessor[] = [
+                { get: () => expr.object, set: (v) => { expr.object = v } },
+            ]
+            for (let i = 0; i < expr.arguments.length; i++) {
+                const idx = i
+                children.push({
+                    get: () => expr.arguments[idx],
+                    set: (v) => { expr.arguments[idx] = v },
+                })
+            }
+            return children
+        }
 
         case "ParenthesizedExpression":
-            expr.expression = mapExpression(expr.expression, visitor)
-            break
+            return [{ get: () => expr.expression, set: (v) => { expr.expression = v } }]
 
         case "TypeAssertionExpression":
-            expr.expression = mapExpression(expr.expression, visitor)
-            break
+            return [{ get: () => expr.expression, set: (v) => { expr.expression = v } }]
 
-        case "IfElseExpression":
+        case "IfElseExpression": {
+            const children: ChildAccessor[] = []
             for (const clause of expr.clauses) {
-                clause.condition = mapExpression(clause.condition, visitor)
-                clause.body = mapExpression(clause.body, visitor)
+                children.push({ get: () => clause.condition, set: (v) => { clause.condition = v } })
+                children.push({ get: () => clause.body, set: (v) => { clause.body = v } })
             }
-            expr.alternate = mapExpression(expr.alternate, visitor)
-            break
+            children.push({ get: () => expr.alternate, set: (v) => { expr.alternate = v } })
+            return children
+        }
+
+        default:
+            return []
+    }
+}
+
+interface WalkFrame {
+    expr: Expression
+    children: ChildAccessor[]
+    index: number
+    setInParent: ((v: Expression) => void) | null
+}
+
+/**
+ * Expression 트리를 후위순회(post-order)로 변형한다.
+ *
+ * 원래는 재귀 함수였지만, 문자열/숫자 난독화 패스가 만들어내는 매우 깊은
+ * BinaryExpression 체인(예: 수천 개의 `..` concat)을 순회할 때 네이티브
+ * 콜스택이 트리 깊이만큼 쌓여 "Maximum call stack size exceeded"가
+ * 발생했다. 그래서 재귀 대신 힙에 할당되는 명시적 스택을 사용해
+ * 트리 깊이와 무관하게 동작하도록 구현했다.
+ */
+export function mapExpression(root: Expression, visitor: ExpressionVisitor): Expression {
+    // FunctionExpression은 본문(statement 트리)을 별도로 순회해야 하므로 특별 취급한다.
+    // 함수 중첩 깊이는 보통 얕아서(재귀해도 안전) 그대로 재귀를 사용한다.
+    if (root.type === "FunctionExpression") {
+        walkFunctionBody(root.func, visitor)
+        return visitor(root) ?? root
     }
 
-    return visitor(expr) ?? expr
+    let result: Expression = root
+    const stack: WalkFrame[] = [{
+        expr: root,
+        children: getExpressionChildren(root),
+        index: 0,
+        setInParent: (v) => { result = v },
+    }]
+
+    while (stack.length > 0) {
+        const frame = stack[stack.length - 1]
+
+        if (frame.index < frame.children.length) {
+            const child = frame.children[frame.index]
+            frame.index++
+            const childExpr = child.get()
+
+            if (childExpr.type === "FunctionExpression") {
+                walkFunctionBody(childExpr.func, visitor)
+                child.set(visitor(childExpr) ?? childExpr)
+                continue
+            }
+
+            stack.push({
+                expr: childExpr,
+                children: getExpressionChildren(childExpr),
+                index: 0,
+                setInParent: child.set,
+            })
+            continue
+        }
+
+        // 모든 자식 처리가 끝났으면 visitor를 실행하고, 부모에 반영한 뒤 pop한다.
+        const finished = visitor(frame.expr) ?? frame.expr
+        frame.setInParent?.(finished)
+        stack.pop()
+    }
+
+    return result
 }
 
 function walkFunctionBody(func: FunctionBody, visitor: ExpressionVisitor): void {

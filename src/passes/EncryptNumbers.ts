@@ -3,7 +3,7 @@ import { transformExpressions } from "./walk"
 import {
     identifier, numberLiteral, call, member,
     localFunctionStatement, functionParam, functionBody, block, returnStatement,
-    localStatement, binary,
+    localStatement, binary, vmStructuralNumbers,
 } from "./nodeFactory"
 
 export interface EncryptNumbersOptions {}
@@ -96,6 +96,7 @@ export function runEncryptNumbers(program: Program, _options: EncryptNumbersOpti
 
     transformExpressions(program, (expr: Expression) => {
         if (expr.type !== "NumberLiteral") return
+        if (vmStructuralNumbers.has(expr)) return
         if (!isEncryptable(expr.value)) return
 
         used = true

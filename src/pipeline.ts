@@ -17,10 +17,10 @@ type PassFn = (program: Program, options: any) => void
 export const PASS_ORDER: (keyof ObfuscateConfig)[] = [
     "Vmify",
     "GlobalMapping",
-    "StringsToExpressions",
-    "NumbersToExpressions",
     "RenameVariables",
     "ConstantArray",
+    "StringsToExpressions",
+    "NumbersToExpressions",
     "EncryptStrings",
     "EncryptNumbers",
     "InsertJunk",
@@ -38,13 +38,10 @@ export const PASS_MAP: Partial<Record<keyof ObfuscateConfig, PassFn>> = {
     EncryptNumbers: runEncryptNumbers,
     InsertJunk: runInsertJunk,
     WrapInFunction: runWrapInFunction,
-    Vmify: runVmify
+    Vmify: runVmify,
 }
 
 export function runPipeline(program: Program, config: ObfuscateConfig): void {
-    // 타입 주석/별칭은 값 트리와 독립적으로 원본 이름을 참조하고 있어서
-    // (예: typeof(x)) 어떤 pass보다도 먼저 지워야 함. 끄면 무조건 깨지므로
-    // config로 조절 가능한 옵션이 아니라 파이프라인 진입 시 항상 실행.
     runStripTypes(program)
 
     for (const key of PASS_ORDER) {

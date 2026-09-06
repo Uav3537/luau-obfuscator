@@ -31,12 +31,7 @@ export interface VmNames {
     varargs: string
     nVarargs: string
     multiTop: string
-    // Instr 테이블 필드 (serialize.ts가 찍고 runtime.ts가 읽음)
-    op: string
-    a: string
-    b: string
-    c: string
-    // Proto 테이블 필드
+    // Proto 테이블 필드 (인스트럭션 자체는 이제 [op,a,b,c] 위치 기반 테이블이라 이름이 필요 없음)
     numParams: string
     hasVarargs: string
     maxRegs: string
@@ -71,7 +66,6 @@ export function generateVmNames(random: () => number = Math.random): VmNames {
         frame: id(),
         R: id(), K: id(), code: id(), protos: id(), upvals: id(), varargs: id(),
         nVarargs: id(), multiTop: id(),
-        op: id(), a: id(), b: id(), c: id(),
         numParams: id(), hasVarargs: id(), maxRegs: id(), consts: id(), upvalDescs: id(),
         kind: id(), index: id(),
     }

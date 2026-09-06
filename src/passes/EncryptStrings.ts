@@ -1,7 +1,7 @@
 import type { Program, Expression } from "luau-parser"
 import { transformExpressions } from "./walk"
 import {
-    identifier, numberLiteral, call, member, index, table, positionalField,
+    identifier, vmNumberLiteral, call, member, index, table, positionalField,
     localFunctionStatement, functionParam, functionBody, block, localStatement,
     assignmentStatement, numericForStatement, returnStatement, unary, binary,
 } from "./nodeFactory"
@@ -57,15 +57,15 @@ function obfuscatedNumber(value: number): Expression {
     const variant = randomInt(0, 2)
     if (variant === 0) {
         const a = randomInt(0, value)
-        return binary("+", numberLiteral(a), numberLiteral(value - a))
+        return binary("+", vmNumberLiteral(a), vmNumberLiteral(value - a))
     }
     if (variant === 1) {
         const a = randomInt(0, 0xFFFFFF)
-        return binary("-", numberLiteral(value + a), numberLiteral(a))
+        return binary("-", vmNumberLiteral(value + a), vmNumberLiteral(a))
     }
     const a = randomInt(0, 0xFFFFFF)
     const b = (value ^ a) >>> 0
-    return call(member(identifier("bit32"), "bxor"), [numberLiteral(a), numberLiteral(b)])
+    return call(member(identifier("bit32"), "bxor"), [vmNumberLiteral(a), vmNumberLiteral(b)])
 }
 
 /**
@@ -92,17 +92,17 @@ function buildDecoderStatement(name: string) {
 
     const idxExpr = binary(
         "+",
-        binary("%", binary("-", identifier(iVar), numberLiteral(1)), identifier(nKeysVar)),
-        numberLiteral(1),
+        binary("%", binary("-", identifier(iVar), vmNumberLiteral(1)), identifier(nKeysVar)),
+        vmNumberLiteral(1),
     )
     const keyByte = index(identifier(keysParam), idxExpr)
     const mixed = call(member(identifier("bit32"), "band"), [
-        call(member(identifier("bit32"), "lrotate"), [keyByte, binary("%", identifier(iVar), numberLiteral(8))]),
-        numberLiteral(0xFF),
+        call(member(identifier("bit32"), "lrotate"), [keyByte, binary("%", identifier(iVar), vmNumberLiteral(8))]),
+        vmNumberLiteral(0xFF),
     ])
     const posByte = call(member(identifier("bit32"), "band"), [
         binary("*", identifier(iVar), identifier(multParam)),
-        numberLiteral(0xFF),
+        vmNumberLiteral(0xFF),
     ])
     const keystream = call(member(identifier("bit32"), "bxor"), [mixed, posByte])
     const finalByte = call(member(identifier("bit32"), "bxor"), [
@@ -115,7 +115,7 @@ function buildDecoderStatement(name: string) {
         localStatement(outVar, table([])),
         numericForStatement(
             iVar,
-            numberLiteral(1),
+            vmNumberLiteral(1),
             unary("#", identifier(dataParam)),
             block([
                 assignmentStatement(
@@ -150,7 +150,7 @@ export function runEncryptStrings(program: Program, _options: EncryptStringsOpti
         const plainBytes = toUtf8Bytes(expr.value)
         const cipherBytes = plainBytes.map((b, idx) => b ^ keystreamByte(keys, mult, idx + 1))
 
-        const dataTable = table(cipherBytes.map((b) => positionalField(numberLiteral(b))))
+        const dataTable = table(cipherBytes.map((b) => positionalField(vmNumberLiteral(b))))
         const keysTable = table(keys.map((k) => positionalField(obfuscatedNumber(k))))
         const multExpr = obfuscatedNumber(mult)
 

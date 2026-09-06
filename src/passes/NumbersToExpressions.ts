@@ -4,7 +4,7 @@ import {
     numberLiteral, binary, paren, identifier, call, index, table, positionalField,
     localStatement, localFunctionStatement, functionParam, functionBody, functionExpression,
     block, assignmentStatement, numericForStatement, whileStatement, ifStatement, ifClause,
-    returnStatement, unary,
+    returnStatement, unary, vmStructuralNumbers,
 } from "./nodeFactory"
 
 export interface NumbersToExpressionsOptions {
@@ -252,6 +252,9 @@ export function runNumbersToExpressions(program: Program, options: NumbersToExpr
 
     transformExpressions(program, (expr) => {
         if (expr.type !== "NumberLiteral") return
+        // Vmify가 만든 op/a/b/c 같은 내부 메타데이터는 건드리지 않는다
+        // (개수가 코드 크기에 비례해 폭증하고, 로직은 이미 Vmify가 구조적으로 숨긴 값).
+        if (vmStructuralNumbers.has(expr)) return
 
         // 루프/재귀 조립은 정수 배분(합이 정확히 일치)에 의존하므로 정수에만 적용하고,
         // 실수/범위를 벗어난 값은 기존 산술식 위장으로 처리한다.

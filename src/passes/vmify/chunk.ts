@@ -21,6 +21,8 @@ export interface Proto {
     maxRegs: number
     code: Instr[]
     consts: ConstValue[]
+    /** consts 배열과 별도로 유지하는 value -> index 조회용 인덱스 (interning을 O(1)로). */
+    constIndex: Map<ConstValue, number>
     /** 이 함수가 캡처하는 upvalue들이 "부모" 기준 어디서 오는지. */
     upvalDescs: UpvalDesc[]
     /** 중첩 함수 표현식들. CLOSURE 명령의 B는 이 배열의 인덱스. */
@@ -35,6 +37,7 @@ export function createProto(id: number): Proto {
         maxRegs: 0,
         code: [],
         consts: [],
+        constIndex: new Map(),
         upvalDescs: [],
         protos: [],
     }
@@ -42,9 +45,10 @@ export function createProto(id: number): Proto {
 
 /** 상수 풀에 값 추가(중복 제거) 후 인덱스 반환. */
 export function internConst(proto: Proto, value: ConstValue): number {
-    for (let i = 0; i < proto.consts.length; i++) {
-        if (proto.consts[i] === value) return i
-    }
+    const existing = proto.constIndex.get(value)
+    if (existing !== undefined) return existing
     proto.consts.push(value)
-    return proto.consts.length - 1
+    const idx = proto.consts.length - 1
+    proto.constIndex.set(value, idx)
+    return idx
 }

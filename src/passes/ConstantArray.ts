@@ -1,7 +1,8 @@
 import type { Program, TableField } from "luau-parser"
 import { transformExpressions } from "./walk"
 import {
-    stringLiteral, numberLiteral, index as indexExpr, identifier, table, localStatement,
+    stringLiteral, numberLiteral, vmNumberLiteral, index as indexExpr, identifier, table, localStatement,
+    vmStructuralNumbers,
 } from "./nodeFactory"
 
 export interface ConstantArrayOptions {
@@ -41,7 +42,7 @@ export function runConstantArray(program: Program, options: ConstantArrayOptions
                 seen.add(k)
                 order.push({ kind: "string", value: expr.value })
             }
-        } else if (expr.type === "NumberLiteral") {
+        } else if (expr.type === "NumberLiteral" && !vmStructuralNumbers.has(expr)) {
             const k = keyOf("number", expr.value)
             if (!seen.has(k)) {
                 seen.add(k)
@@ -70,11 +71,11 @@ export function runConstantArray(program: Program, options: ConstantArrayOptions
     transformExpressions(program, (expr) => {
         if (expr.type === "StringLiteral") {
             const idx = indexOf.get(keyOf("string", expr.value))!
-            return indexExpr(identifier(arrayName), numberLiteral(idx))
+            return indexExpr(identifier(arrayName), vmNumberLiteral(idx))
         }
-        if (expr.type === "NumberLiteral") {
+        if (expr.type === "NumberLiteral" && !vmStructuralNumbers.has(expr)) {
             const idx = indexOf.get(keyOf("number", expr.value))!
-            return indexExpr(identifier(arrayName), numberLiteral(idx))
+            return indexExpr(identifier(arrayName), vmNumberLiteral(idx))
         }
         return undefined
     })

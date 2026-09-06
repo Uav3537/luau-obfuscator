@@ -30,7 +30,7 @@ local ${N.handlers} = {}
 
 local function ${N.dispatch}(${N.frame}, pc)
     local instr = ${N.frame}.${N.code}[pc]
-    return ${N.handlers}[instr.${N.op}](${N.frame}, pc, instr)
+    return ${N.handlers}[instr[1]](${N.frame}, pc, instr)
 end
 
 local function ${N.rk}(${N.frame}, x)
@@ -43,156 +43,156 @@ end
 
 -- MOVE
 ${N.handlers}[${op(Opcode.MOVE)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LOADK
 ${N.handlers}[${op(Opcode.LOADK)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.K}[instr.${N.b} + 1]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.K}[instr[3] + 1]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LOADBOOL
 ${N.handlers}[${op(Opcode.LOADBOOL)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = (instr.${N.b} ~= 0)
+    ${N.frame}.${N.R}[instr[2]] = (instr[3] ~= 0)
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LOADNIL
 ${N.handlers}[${op(Opcode.LOADNIL)}] = function(${N.frame}, pc, instr)
-    for i = instr.${N.a}, instr.${N.b} do ${N.frame}.${N.R}[i] = nil end
+    for i = instr[2], instr[3] do ${N.frame}.${N.R}[i] = nil end
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- GETUPVAL
 ${N.handlers}[${op(Opcode.GETUPVAL)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.upvals}[instr.${N.b} + 1]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.upvals}[instr[3] + 1]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETUPVAL
 ${N.handlers}[${op(Opcode.SETUPVAL)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.upvals}[instr.${N.b} + 1] = ${N.frame}.${N.R}[instr.${N.a}]
+    ${N.frame}.${N.upvals}[instr[3] + 1] = ${N.frame}.${N.R}[instr[2]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- GETGLOBAL (b는 RK가 아니라 상수풀 순수 인덱스)
 ${N.handlers}[${op(Opcode.GETGLOBAL)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.globals}[${N.frame}.${N.K}[instr.${N.b} + 1]]
+    ${N.frame}.${N.R}[instr[2]] = ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETGLOBAL
 ${N.handlers}[${op(Opcode.SETGLOBAL)}] = function(${N.frame}, pc, instr)
-    ${N.globals}[${N.frame}.${N.K}[instr.${N.b} + 1]] = ${N.frame}.${N.R}[instr.${N.a}]
+    ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]] = ${N.frame}.${N.R}[instr[2]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- GETTABLE
 ${N.handlers}[${op(Opcode.GETTABLE)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.R}[instr.${N.b}][${N.rk}(${N.frame}, instr.${N.c})]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]][${N.rk}(${N.frame}, instr[4])]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETTABLE
 ${N.handlers}[${op(Opcode.SETTABLE)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}][${N.rk}(${N.frame}, instr.${N.b})] = ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]][${N.rk}(${N.frame}, instr[3])] = ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- NEWTABLE
 ${N.handlers}[${op(Opcode.NEWTABLE)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = {}
+    ${N.frame}.${N.R}[instr[2]] = {}
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SELF  (R[a] = R[b][key]; R[a+1] = R[b])
 ${N.handlers}[${op(Opcode.SELF)}] = function(${N.frame}, pc, instr)
-    local obj = ${N.frame}.${N.R}[instr.${N.b}]
-    ${N.frame}.${N.R}[instr.${N.a}] = obj[${N.rk}(${N.frame}, instr.${N.c})]
-    ${N.frame}.${N.R}[instr.${N.a} + 1] = obj
+    local obj = ${N.frame}.${N.R}[instr[3]]
+    ${N.frame}.${N.R}[instr[2]] = obj[${N.rk}(${N.frame}, instr[4])]
+    ${N.frame}.${N.R}[instr[2] + 1] = obj
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- ADD SUB MUL DIV MOD POW
 ${N.handlers}[${op(Opcode.ADD)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) + ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) + ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(Opcode.SUB)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) - ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) - ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(Opcode.MUL)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) * ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) * ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(Opcode.DIV)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) / ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) / ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(Opcode.MOD)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) % ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) % ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(Opcode.POW)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) ^ ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) ^ ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- IDIV (Luau 바닥 나눗셈)
 ${N.handlers}[${op(Opcode.IDIV)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) // ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) // ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- CONCAT
 ${N.handlers}[${op(Opcode.CONCAT)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) .. ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) .. ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- UNM
 ${N.handlers}[${op(Opcode.UNM)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = -${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = -${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- NOT
 ${N.handlers}[${op(Opcode.NOT)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = not ${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = not ${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LEN
 ${N.handlers}[${op(Opcode.LEN)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = #${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = #${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- JMP (pc += a)
 ${N.handlers}[${op(Opcode.JMP)}] = function(${N.frame}, pc, instr)
-    return ${N.dispatch}(${N.frame}, pc + instr.${N.a})
+    return ${N.dispatch}(${N.frame}, pc + instr[2])
 end
 
 -- EQ LT LE (값 생성형 비교)
 ${N.handlers}[${op(Opcode.EQ)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) == ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) == ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(Opcode.LT)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) < ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) < ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(Opcode.LE)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) <= ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) <= ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- TEST (if (not R[a]) != (c!=0) then pc += 2 else pc += 1 — 보통 다음 명령은 JMP)
 ${N.handlers}[${op(Opcode.TEST)}] = function(${N.frame}, pc, instr)
-    if (not ${N.frame}.${N.R}[instr.${N.a}]) ~= (instr.${N.c} ~= 0) then
+    if (not ${N.frame}.${N.R}[instr[2]]) ~= (instr[4] ~= 0) then
         return ${N.dispatch}(${N.frame}, pc + 2)
     end
     return ${N.dispatch}(${N.frame}, pc + 1)
@@ -200,7 +200,7 @@ end
 
 -- CALL
 ${N.handlers}[${op(Opcode.CALL)}] = function(${N.frame}, pc, instr)
-    local a, b, c = instr.${N.a}, instr.${N.b}, instr.${N.c}
+    local a, b, c = instr[2], instr[3], instr[4]
     local fn = ${N.frame}.${N.R}[a]
     local nargs
     if b == 0 then
@@ -225,7 +225,7 @@ end
 
 -- RETURN
 ${N.handlers}[${op(Opcode.RETURN)}] = function(${N.frame}, pc, instr)
-    local a, b = instr.${N.a}, instr.${N.b}
+    local a, b = instr[2], instr[3]
     if b == 0 then
         return table.unpack(${N.frame}.${N.R}, a, (${N.frame}.${N.multiTop} or (a + 1)) - 1)
     end
@@ -234,14 +234,14 @@ end
 
 -- FORPREP
 ${N.handlers}[${op(Opcode.FORPREP)}] = function(${N.frame}, pc, instr)
-    local a = instr.${N.a}
+    local a = instr[2]
     ${N.frame}.${N.R}[a] = ${N.frame}.${N.R}[a] - ${N.frame}.${N.R}[a + 2]
-    return ${N.dispatch}(${N.frame}, pc + instr.${N.b})
+    return ${N.dispatch}(${N.frame}, pc + instr[3])
 end
 
 -- FORLOOP
 ${N.handlers}[${op(Opcode.FORLOOP)}] = function(${N.frame}, pc, instr)
-    local a = instr.${N.a}
+    local a = instr[2]
     local step = ${N.frame}.${N.R}[a + 2]
     ${N.frame}.${N.R}[a] = ${N.frame}.${N.R}[a] + step
     local ok
@@ -252,26 +252,26 @@ ${N.handlers}[${op(Opcode.FORLOOP)}] = function(${N.frame}, pc, instr)
     end
     if ok then
         ${N.frame}.${N.R}[a + 3] = ${N.frame}.${N.R}[a]
-        return ${N.dispatch}(${N.frame}, pc + instr.${N.b})
+        return ${N.dispatch}(${N.frame}, pc + instr[3])
     end
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- CLOSURE
 ${N.handlers}[${op(Opcode.CLOSURE)}] = function(${N.frame}, pc, instr)
-    local childProto = ${N.frame}.${N.protos}[instr.${N.b} + 1]
+    local childProto = ${N.frame}.${N.protos}[instr[3] + 1]
     local n = #childProto.${N.upvalDescs}
     local capturedUpvals = table.create(n)
     for i = 1, n do
         local desc = childProto.${N.upvalDescs}[i]
         local captureInstr = ${N.frame}.${N.code}[pc + i]
         if desc.${N.kind} == "local" then
-            capturedUpvals[i] = ${N.frame}.${N.R}[captureInstr.${N.b}]
+            capturedUpvals[i] = ${N.frame}.${N.R}[captureInstr[3]]
         else
-            capturedUpvals[i] = ${N.frame}.${N.upvals}[captureInstr.${N.b} + 1]
+            capturedUpvals[i] = ${N.frame}.${N.upvals}[captureInstr[3] + 1]
         end
     end
-    ${N.frame}.${N.R}[instr.${N.a}] = function(...)
+    ${N.frame}.${N.R}[instr[2]] = function(...)
         return ${N.execute}(childProto, capturedUpvals, ...)
     end
     return ${N.dispatch}(${N.frame}, pc + 1 + n)
@@ -279,22 +279,22 @@ end
 
 -- VARARG
 ${N.handlers}[${op(Opcode.VARARG)}] = function(${N.frame}, pc, instr)
-    local count = instr.${N.b} == 0 and ${N.frame}.${N.nVarargs} or (instr.${N.b} - 1)
+    local count = instr[3] == 0 and ${N.frame}.${N.nVarargs} or (instr[3] - 1)
     for i = 1, count do
-        ${N.frame}.${N.R}[instr.${N.a} + i - 1] = ${N.frame}.${N.varargs}[i]
+        ${N.frame}.${N.R}[instr[2] + i - 1] = ${N.frame}.${N.varargs}[i]
     end
-    if instr.${N.b} == 0 then
-        ${N.frame}.${N.multiTop} = instr.${N.a} + count
+    if instr[3] == 0 then
+        ${N.frame}.${N.multiTop} = instr[2] + count
     end
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETLIST
 ${N.handlers}[${op(Opcode.SETLIST)}] = function(${N.frame}, pc, instr)
-    local tbl = ${N.frame}.${N.R}[instr.${N.a}]
-    local valuesBase = instr.${N.b}
+    local tbl = ${N.frame}.${N.R}[instr[2]]
+    local valuesBase = instr[3]
     local top = ${N.frame}.${N.multiTop} or (valuesBase + 1)
-    local startIdx = instr.${N.c}
+    local startIdx = instr[4]
     local n = top - valuesBase
     for i = 0, n - 1 do
         tbl[startIdx + i] = ${N.frame}.${N.R}[valuesBase + i]

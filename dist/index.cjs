@@ -209,67 +209,171 @@ function visitArray(arr, visitor) {
     arr[i] = mapExpression(arr[i], visitor);
   }
 }
-function mapExpression(expr, visitor) {
+function getExpressionChildren(expr) {
   switch (expr.type) {
-    case "InterpolatedStringExpression":
+    case "InterpolatedStringExpression": {
+      const children = [];
       for (const part of expr.parts) {
         if (part.kind === "expression") {
-          part.expression = mapExpression(part.expression, visitor);
+          children.push({
+            get: () => part.expression,
+            set: (v) => {
+              part.expression = v;
+            }
+          });
         }
       }
-      break;
+      return children;
+    }
     case "FunctionExpression":
-      walkFunctionBody(expr.func, visitor);
-      break;
-    case "TableExpression":
+      return [];
+    case "TableExpression": {
+      const children = [];
       for (const field of expr.fields) {
         if (field.type === "TableFieldPositional") {
-          field.value = mapExpression(field.value, visitor);
+          children.push({ get: () => field.value, set: (v) => {
+            field.value = v;
+          } });
         } else if (field.type === "TableFieldNamed") {
-          field.value = mapExpression(field.value, visitor);
+          children.push({ get: () => field.value, set: (v) => {
+            field.value = v;
+          } });
         } else if (field.type === "TableFieldComputed") {
-          field.key = mapExpression(field.key, visitor);
-          field.value = mapExpression(field.value, visitor);
+          children.push({ get: () => field.key, set: (v) => {
+            field.key = v;
+          } });
+          children.push({ get: () => field.value, set: (v) => {
+            field.value = v;
+          } });
         }
       }
-      break;
+      return children;
+    }
     case "BinaryExpression":
-      expr.left = mapExpression(expr.left, visitor);
-      expr.right = mapExpression(expr.right, visitor);
-      break;
+      return [
+        { get: () => expr.left, set: (v) => {
+          expr.left = v;
+        } },
+        { get: () => expr.right, set: (v) => {
+          expr.right = v;
+        } }
+      ];
     case "UnaryExpression":
-      expr.argument = mapExpression(expr.argument, visitor);
-      break;
+      return [{ get: () => expr.argument, set: (v) => {
+        expr.argument = v;
+      } }];
     case "MemberExpression":
-      expr.object = mapExpression(expr.object, visitor);
-      break;
+      return [{ get: () => expr.object, set: (v) => {
+        expr.object = v;
+      } }];
     case "IndexExpression":
-      expr.object = mapExpression(expr.object, visitor);
-      expr.index = mapExpression(expr.index, visitor);
-      break;
-    case "CallExpression":
-      expr.callee = mapExpression(expr.callee, visitor);
-      visitArray(expr.arguments, visitor);
-      break;
-    case "MethodCallExpression":
-      expr.object = mapExpression(expr.object, visitor);
-      visitArray(expr.arguments, visitor);
-      break;
-    case "ParenthesizedExpression":
-      expr.expression = mapExpression(expr.expression, visitor);
-      break;
-    case "TypeAssertionExpression":
-      expr.expression = mapExpression(expr.expression, visitor);
-      break;
-    case "IfElseExpression":
-      for (const clause of expr.clauses) {
-        clause.condition = mapExpression(clause.condition, visitor);
-        clause.body = mapExpression(clause.body, visitor);
+      return [
+        { get: () => expr.object, set: (v) => {
+          expr.object = v;
+        } },
+        { get: () => expr.index, set: (v) => {
+          expr.index = v;
+        } }
+      ];
+    case "CallExpression": {
+      const children = [
+        { get: () => expr.callee, set: (v) => {
+          expr.callee = v;
+        } }
+      ];
+      for (let i = 0; i < expr.arguments.length; i++) {
+        const idx = i;
+        children.push({
+          get: () => expr.arguments[idx],
+          set: (v) => {
+            expr.arguments[idx] = v;
+          }
+        });
       }
-      expr.alternate = mapExpression(expr.alternate, visitor);
-      break;
+      return children;
+    }
+    case "MethodCallExpression": {
+      const children = [
+        { get: () => expr.object, set: (v) => {
+          expr.object = v;
+        } }
+      ];
+      for (let i = 0; i < expr.arguments.length; i++) {
+        const idx = i;
+        children.push({
+          get: () => expr.arguments[idx],
+          set: (v) => {
+            expr.arguments[idx] = v;
+          }
+        });
+      }
+      return children;
+    }
+    case "ParenthesizedExpression":
+      return [{ get: () => expr.expression, set: (v) => {
+        expr.expression = v;
+      } }];
+    case "TypeAssertionExpression":
+      return [{ get: () => expr.expression, set: (v) => {
+        expr.expression = v;
+      } }];
+    case "IfElseExpression": {
+      const children = [];
+      for (const clause of expr.clauses) {
+        children.push({ get: () => clause.condition, set: (v) => {
+          clause.condition = v;
+        } });
+        children.push({ get: () => clause.body, set: (v) => {
+          clause.body = v;
+        } });
+      }
+      children.push({ get: () => expr.alternate, set: (v) => {
+        expr.alternate = v;
+      } });
+      return children;
+    }
+    default:
+      return [];
   }
-  return visitor(expr) ?? expr;
+}
+function mapExpression(root, visitor) {
+  if (root.type === "FunctionExpression") {
+    walkFunctionBody(root.func, visitor);
+    return visitor(root) ?? root;
+  }
+  let result = root;
+  const stack = [{
+    expr: root,
+    children: getExpressionChildren(root),
+    index: 0,
+    setInParent: (v) => {
+      result = v;
+    }
+  }];
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    if (frame.index < frame.children.length) {
+      const child = frame.children[frame.index];
+      frame.index++;
+      const childExpr = child.get();
+      if (childExpr.type === "FunctionExpression") {
+        walkFunctionBody(childExpr.func, visitor);
+        child.set(visitor(childExpr) ?? childExpr);
+        continue;
+      }
+      stack.push({
+        expr: childExpr,
+        children: getExpressionChildren(childExpr),
+        index: 0,
+        setInParent: child.set
+      });
+      continue;
+    }
+    const finished = visitor(frame.expr) ?? frame.expr;
+    frame.setInParent?.(finished);
+    stack.pop();
+  }
+  return result;
 }
 function walkFunctionBody(func, visitor) {
   walkBlock(func.body, visitor);
@@ -354,6 +458,12 @@ function stringLiteral(value) {
 }
 function numberLiteral(value) {
   return { type: "NumberLiteral", value, raw: String(value), line: POS, column: POS };
+}
+var vmStructuralNumbers = /* @__PURE__ */ new WeakSet();
+function vmNumberLiteral(value) {
+  const node = numberLiteral(value);
+  vmStructuralNumbers.add(node);
+  return node;
 }
 function binary(operator, left, right) {
   return { type: "BinaryExpression", operator, left, right, line: POS, column: POS };
@@ -487,11 +597,12 @@ function stringCharCall(bytes) {
   return call(member(identifier("string"), "char"), bytes.map(numberLiteral));
 }
 function buildConcatChain(chunks) {
-  let expr = stringCharCall(chunks[0]);
-  for (let i = 1; i < chunks.length; i++) {
-    expr = binary("..", expr, stringCharCall(chunks[i]));
+  function build(lo, hi) {
+    if (hi - lo === 1) return stringCharCall(chunks[lo]);
+    const mid = lo + Math.floor((hi - lo) / 2);
+    return binary("..", build(lo, mid), build(mid, hi));
   }
-  return expr;
+  return build(0, chunks.length);
 }
 function shuffledIndices(n) {
   const arr = Array.from({ length: n }, (_, i) => i);
@@ -583,12 +694,15 @@ function buildRecursiveStringExpr(chunks) {
 function pickControlFlowStrategy() {
   return Math.random() < 0.5 ? "forLoop" : "recursive";
 }
+var MAX_CHUNKS_PER_STRING = 2e4;
 function runStringsToExpressions(program, options) {
   const controlFlowProbability = options.controlFlowProbability ?? CONTROL_FLOW_PROBABILITY_DEFAULT;
   transformExpressions(program, (expr) => {
     if (expr.type !== "StringLiteral") return;
     if (expr.value.length === 0) return;
     const bytes = toUtf8Bytes(expr.value);
+    const estimatedChunks = Math.ceil(bytes.length / Math.max(1, options.min));
+    if (estimatedChunks > MAX_CHUNKS_PER_STRING) return;
     const chunks = splitByteChunks(bytes, options.min, options.max);
     if (chunks.length > 1 && Math.random() < controlFlowProbability) {
       return pickControlFlowStrategy() === "forLoop" ? buildForLoopStringExpr(chunks) : buildRecursiveStringExpr(chunks);
@@ -761,6 +875,7 @@ function runNumbersToExpressions(program, options) {
   const controlFlowProbability = options.controlFlowProbability ?? CONTROL_FLOW_PROBABILITY_DEFAULT2;
   transformExpressions(program, (expr) => {
     if (expr.type !== "NumberLiteral") return;
+    if (vmStructuralNumbers.has(expr)) return;
     if (Number.isInteger(expr.value) && Math.random() < controlFlowProbability) {
       return buildControlFlowNumberExpr(expr.value, options.min, options.max);
     }
@@ -953,7 +1068,7 @@ function runConstantArray(program, options) {
         seen.add(k);
         order.push({ kind: "string", value: expr.value });
       }
-    } else if (expr.type === "NumberLiteral") {
+    } else if (expr.type === "NumberLiteral" && !vmStructuralNumbers.has(expr)) {
       const k = keyOf("number", expr.value);
       if (!seen.has(k)) {
         seen.add(k);
@@ -973,11 +1088,11 @@ function runConstantArray(program, options) {
   transformExpressions(program, (expr) => {
     if (expr.type === "StringLiteral") {
       const idx = indexOf.get(keyOf("string", expr.value));
-      return index(identifier(arrayName), numberLiteral(idx));
+      return index(identifier(arrayName), vmNumberLiteral(idx));
     }
-    if (expr.type === "NumberLiteral") {
+    if (expr.type === "NumberLiteral" && !vmStructuralNumbers.has(expr)) {
       const idx = indexOf.get(keyOf("number", expr.value));
-      return index(identifier(arrayName), numberLiteral(idx));
+      return index(identifier(arrayName), vmNumberLiteral(idx));
     }
     return void 0;
   });
@@ -1018,15 +1133,15 @@ function obfuscatedNumber(value) {
   const variant = randomInt4(0, 2);
   if (variant === 0) {
     const a2 = randomInt4(0, value);
-    return binary("+", numberLiteral(a2), numberLiteral(value - a2));
+    return binary("+", vmNumberLiteral(a2), vmNumberLiteral(value - a2));
   }
   if (variant === 1) {
     const a2 = randomInt4(0, 16777215);
-    return binary("-", numberLiteral(value + a2), numberLiteral(a2));
+    return binary("-", vmNumberLiteral(value + a2), vmNumberLiteral(a2));
   }
   const a = randomInt4(0, 16777215);
   const b = (value ^ a) >>> 0;
-  return call(member(identifier("bit32"), "bxor"), [numberLiteral(a), numberLiteral(b)]);
+  return call(member(identifier("bit32"), "bxor"), [vmNumberLiteral(a), vmNumberLiteral(b)]);
 }
 function buildDecoderStatement(name) {
   const dataParam = randomName3();
@@ -1037,17 +1152,17 @@ function buildDecoderStatement(name) {
   const nKeysVar = randomName3();
   const idxExpr = binary(
     "+",
-    binary("%", binary("-", identifier(iVar), numberLiteral(1)), identifier(nKeysVar)),
-    numberLiteral(1)
+    binary("%", binary("-", identifier(iVar), vmNumberLiteral(1)), identifier(nKeysVar)),
+    vmNumberLiteral(1)
   );
   const keyByte = index(identifier(keysParam), idxExpr);
   const mixed = call(member(identifier("bit32"), "band"), [
-    call(member(identifier("bit32"), "lrotate"), [keyByte, binary("%", identifier(iVar), numberLiteral(8))]),
-    numberLiteral(255)
+    call(member(identifier("bit32"), "lrotate"), [keyByte, binary("%", identifier(iVar), vmNumberLiteral(8))]),
+    vmNumberLiteral(255)
   ]);
   const posByte = call(member(identifier("bit32"), "band"), [
     binary("*", identifier(iVar), identifier(multParam)),
-    numberLiteral(255)
+    vmNumberLiteral(255)
   ]);
   const keystream = call(member(identifier("bit32"), "bxor"), [mixed, posByte]);
   const finalByte = call(member(identifier("bit32"), "bxor"), [
@@ -1059,7 +1174,7 @@ function buildDecoderStatement(name) {
     localStatement(outVar, table([])),
     numericForStatement(
       iVar,
-      numberLiteral(1),
+      vmNumberLiteral(1),
       unary("#", identifier(dataParam)),
       block([
         assignmentStatement(
@@ -1087,7 +1202,7 @@ function runEncryptStrings(program, _options) {
     const mult = randomInt4(1, 255);
     const plainBytes = toUtf8Bytes2(expr.value);
     const cipherBytes = plainBytes.map((b, idx) => b ^ keystreamByte(keys, mult, idx + 1));
-    const dataTable = table(cipherBytes.map((b) => positionalField(numberLiteral(b))));
+    const dataTable = table(cipherBytes.map((b) => positionalField(vmNumberLiteral(b))));
     const keysTable = table(keys.map((k) => positionalField(obfuscatedNumber(k))));
     const multExpr = obfuscatedNumber(mult);
     return call(identifier(decoderName), [dataTable, keysTable, multExpr]);
@@ -1154,6 +1269,7 @@ function runEncryptNumbers(program, _options) {
   let used = false;
   transformExpressions(program, (expr) => {
     if (expr.type !== "NumberLiteral") return;
+    if (vmStructuralNumbers.has(expr)) return;
     if (!isEncryptable(expr.value)) return;
     used = true;
     const keyA = randomInt5(1, 16777215);
@@ -1404,16 +1520,18 @@ function createProto(id) {
     maxRegs: 0,
     code: [],
     consts: [],
+    constIndex: /* @__PURE__ */ new Map(),
     upvalDescs: [],
     protos: []
   };
 }
 function internConst(proto, value) {
-  for (let i = 0; i < proto.consts.length; i++) {
-    if (proto.consts[i] === value) return i;
-  }
+  const existing = proto.constIndex.get(value);
+  if (existing !== void 0) return existing;
   proto.consts.push(value);
-  return proto.consts.length - 1;
+  const idx = proto.consts.length - 1;
+  proto.constIndex.set(value, idx);
+  return idx;
 }
 
 // src/passes/vmify/registers.ts
@@ -2585,13 +2703,13 @@ function serializeConstValue(v) {
   if (typeof v === "number") return numberLiteral(v);
   return booleanLiteral(v);
 }
-function serializeInstrs(proto, names) {
+function serializeInstrs(proto) {
   const fields = proto.code.map((instr) => positionalField(
     table([
-      namedField(names.op, numberLiteral(instr.op)),
-      namedField(names.a, numberLiteral(instr.a)),
-      namedField(names.b, numberLiteral(instr.b)),
-      namedField(names.c, numberLiteral(instr.c))
+      positionalField(vmNumberLiteral(instr.op)),
+      positionalField(vmNumberLiteral(instr.a)),
+      positionalField(vmNumberLiteral(instr.b)),
+      positionalField(vmNumberLiteral(instr.c))
     ])
   ));
   return table(fields);
@@ -2600,17 +2718,17 @@ function serializeUpvalDescs(proto, names) {
   const fields = proto.upvalDescs.map((d) => positionalField(
     table([
       namedField(names.kind, stringLiteral(d.kind)),
-      namedField(names.index, numberLiteral(d.index))
+      namedField(names.index, vmNumberLiteral(d.index))
     ])
   ));
   return table(fields);
 }
 function serializeProto(proto, names) {
   const fields = [
-    namedField(names.numParams, numberLiteral(proto.numParams)),
+    namedField(names.numParams, vmNumberLiteral(proto.numParams)),
     namedField(names.hasVarargs, booleanLiteral(proto.hasVarargs)),
-    namedField(names.maxRegs, numberLiteral(proto.maxRegs)),
-    namedField(names.code, serializeInstrs(proto, names)),
+    namedField(names.maxRegs, vmNumberLiteral(proto.maxRegs)),
+    namedField(names.code, serializeInstrs(proto)),
     namedField(names.consts, serializeConsts(proto.consts)),
     namedField(names.upvalDescs, serializeUpvalDescs(proto, names)),
     namedField(names.protos, table(proto.protos.map((p) => positionalField(serializeProto(p, names)))))
@@ -2627,7 +2745,7 @@ local ${N.handlers} = {}
 
 local function ${N.dispatch}(${N.frame}, pc)
     local instr = ${N.frame}.${N.code}[pc]
-    return ${N.handlers}[instr.${N.op}](${N.frame}, pc, instr)
+    return ${N.handlers}[instr[1]](${N.frame}, pc, instr)
 end
 
 local function ${N.rk}(${N.frame}, x)
@@ -2640,156 +2758,156 @@ end
 
 -- MOVE
 ${N.handlers}[${op(0 /* MOVE */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LOADK
 ${N.handlers}[${op(1 /* LOADK */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.K}[instr.${N.b} + 1]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.K}[instr[3] + 1]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LOADBOOL
 ${N.handlers}[${op(2 /* LOADBOOL */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = (instr.${N.b} ~= 0)
+    ${N.frame}.${N.R}[instr[2]] = (instr[3] ~= 0)
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LOADNIL
 ${N.handlers}[${op(3 /* LOADNIL */)}] = function(${N.frame}, pc, instr)
-    for i = instr.${N.a}, instr.${N.b} do ${N.frame}.${N.R}[i] = nil end
+    for i = instr[2], instr[3] do ${N.frame}.${N.R}[i] = nil end
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- GETUPVAL
 ${N.handlers}[${op(4 /* GETUPVAL */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.upvals}[instr.${N.b} + 1]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.upvals}[instr[3] + 1]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETUPVAL
 ${N.handlers}[${op(5 /* SETUPVAL */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.upvals}[instr.${N.b} + 1] = ${N.frame}.${N.R}[instr.${N.a}]
+    ${N.frame}.${N.upvals}[instr[3] + 1] = ${N.frame}.${N.R}[instr[2]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- GETGLOBAL (b\uB294 RK\uAC00 \uC544\uB2C8\uB77C \uC0C1\uC218\uD480 \uC21C\uC218 \uC778\uB371\uC2A4)
 ${N.handlers}[${op(6 /* GETGLOBAL */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.globals}[${N.frame}.${N.K}[instr.${N.b} + 1]]
+    ${N.frame}.${N.R}[instr[2]] = ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETGLOBAL
 ${N.handlers}[${op(7 /* SETGLOBAL */)}] = function(${N.frame}, pc, instr)
-    ${N.globals}[${N.frame}.${N.K}[instr.${N.b} + 1]] = ${N.frame}.${N.R}[instr.${N.a}]
+    ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]] = ${N.frame}.${N.R}[instr[2]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- GETTABLE
 ${N.handlers}[${op(8 /* GETTABLE */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.frame}.${N.R}[instr.${N.b}][${N.rk}(${N.frame}, instr.${N.c})]
+    ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]][${N.rk}(${N.frame}, instr[4])]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETTABLE
 ${N.handlers}[${op(9 /* SETTABLE */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}][${N.rk}(${N.frame}, instr.${N.b})] = ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]][${N.rk}(${N.frame}, instr[3])] = ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- NEWTABLE
 ${N.handlers}[${op(10 /* NEWTABLE */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = {}
+    ${N.frame}.${N.R}[instr[2]] = {}
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SELF  (R[a] = R[b][key]; R[a+1] = R[b])
 ${N.handlers}[${op(11 /* SELF */)}] = function(${N.frame}, pc, instr)
-    local obj = ${N.frame}.${N.R}[instr.${N.b}]
-    ${N.frame}.${N.R}[instr.${N.a}] = obj[${N.rk}(${N.frame}, instr.${N.c})]
-    ${N.frame}.${N.R}[instr.${N.a} + 1] = obj
+    local obj = ${N.frame}.${N.R}[instr[3]]
+    ${N.frame}.${N.R}[instr[2]] = obj[${N.rk}(${N.frame}, instr[4])]
+    ${N.frame}.${N.R}[instr[2] + 1] = obj
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- ADD SUB MUL DIV MOD POW
 ${N.handlers}[${op(12 /* ADD */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) + ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) + ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(13 /* SUB */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) - ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) - ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(14 /* MUL */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) * ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) * ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(15 /* DIV */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) / ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) / ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(16 /* MOD */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) % ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) % ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(17 /* POW */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) ^ ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) ^ ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- IDIV (Luau \uBC14\uB2E5 \uB098\uB217\uC148)
 ${N.handlers}[${op(34 /* IDIV */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) // ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) // ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- CONCAT
 ${N.handlers}[${op(18 /* CONCAT */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) .. ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) .. ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- UNM
 ${N.handlers}[${op(19 /* UNM */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = -${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = -${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- NOT
 ${N.handlers}[${op(20 /* NOT */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = not ${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = not ${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- LEN
 ${N.handlers}[${op(21 /* LEN */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = #${N.frame}.${N.R}[instr.${N.b}]
+    ${N.frame}.${N.R}[instr[2]] = #${N.frame}.${N.R}[instr[3]]
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- JMP (pc += a)
 ${N.handlers}[${op(22 /* JMP */)}] = function(${N.frame}, pc, instr)
-    return ${N.dispatch}(${N.frame}, pc + instr.${N.a})
+    return ${N.dispatch}(${N.frame}, pc + instr[2])
 end
 
 -- EQ LT LE (\uAC12 \uC0DD\uC131\uD615 \uBE44\uAD50)
 ${N.handlers}[${op(23 /* EQ */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) == ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) == ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(24 /* LT */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) < ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) < ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 ${N.handlers}[${op(25 /* LE */)}] = function(${N.frame}, pc, instr)
-    ${N.frame}.${N.R}[instr.${N.a}] = ${N.rk}(${N.frame}, instr.${N.b}) <= ${N.rk}(${N.frame}, instr.${N.c})
+    ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) <= ${N.rk}(${N.frame}, instr[4])
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- TEST (if (not R[a]) != (c!=0) then pc += 2 else pc += 1 \u2014 \uBCF4\uD1B5 \uB2E4\uC74C \uBA85\uB839\uC740 JMP)
 ${N.handlers}[${op(26 /* TEST */)}] = function(${N.frame}, pc, instr)
-    if (not ${N.frame}.${N.R}[instr.${N.a}]) ~= (instr.${N.c} ~= 0) then
+    if (not ${N.frame}.${N.R}[instr[2]]) ~= (instr[4] ~= 0) then
         return ${N.dispatch}(${N.frame}, pc + 2)
     end
     return ${N.dispatch}(${N.frame}, pc + 1)
@@ -2797,7 +2915,7 @@ end
 
 -- CALL
 ${N.handlers}[${op(27 /* CALL */)}] = function(${N.frame}, pc, instr)
-    local a, b, c = instr.${N.a}, instr.${N.b}, instr.${N.c}
+    local a, b, c = instr[2], instr[3], instr[4]
     local fn = ${N.frame}.${N.R}[a]
     local nargs
     if b == 0 then
@@ -2822,7 +2940,7 @@ end
 
 -- RETURN
 ${N.handlers}[${op(28 /* RETURN */)}] = function(${N.frame}, pc, instr)
-    local a, b = instr.${N.a}, instr.${N.b}
+    local a, b = instr[2], instr[3]
     if b == 0 then
         return table.unpack(${N.frame}.${N.R}, a, (${N.frame}.${N.multiTop} or (a + 1)) - 1)
     end
@@ -2831,14 +2949,14 @@ end
 
 -- FORPREP
 ${N.handlers}[${op(29 /* FORPREP */)}] = function(${N.frame}, pc, instr)
-    local a = instr.${N.a}
+    local a = instr[2]
     ${N.frame}.${N.R}[a] = ${N.frame}.${N.R}[a] - ${N.frame}.${N.R}[a + 2]
-    return ${N.dispatch}(${N.frame}, pc + instr.${N.b})
+    return ${N.dispatch}(${N.frame}, pc + instr[3])
 end
 
 -- FORLOOP
 ${N.handlers}[${op(30 /* FORLOOP */)}] = function(${N.frame}, pc, instr)
-    local a = instr.${N.a}
+    local a = instr[2]
     local step = ${N.frame}.${N.R}[a + 2]
     ${N.frame}.${N.R}[a] = ${N.frame}.${N.R}[a] + step
     local ok
@@ -2849,26 +2967,26 @@ ${N.handlers}[${op(30 /* FORLOOP */)}] = function(${N.frame}, pc, instr)
     end
     if ok then
         ${N.frame}.${N.R}[a + 3] = ${N.frame}.${N.R}[a]
-        return ${N.dispatch}(${N.frame}, pc + instr.${N.b})
+        return ${N.dispatch}(${N.frame}, pc + instr[3])
     end
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- CLOSURE
 ${N.handlers}[${op(31 /* CLOSURE */)}] = function(${N.frame}, pc, instr)
-    local childProto = ${N.frame}.${N.protos}[instr.${N.b} + 1]
+    local childProto = ${N.frame}.${N.protos}[instr[3] + 1]
     local n = #childProto.${N.upvalDescs}
     local capturedUpvals = table.create(n)
     for i = 1, n do
         local desc = childProto.${N.upvalDescs}[i]
         local captureInstr = ${N.frame}.${N.code}[pc + i]
         if desc.${N.kind} == "local" then
-            capturedUpvals[i] = ${N.frame}.${N.R}[captureInstr.${N.b}]
+            capturedUpvals[i] = ${N.frame}.${N.R}[captureInstr[3]]
         else
-            capturedUpvals[i] = ${N.frame}.${N.upvals}[captureInstr.${N.b} + 1]
+            capturedUpvals[i] = ${N.frame}.${N.upvals}[captureInstr[3] + 1]
         end
     end
-    ${N.frame}.${N.R}[instr.${N.a}] = function(...)
+    ${N.frame}.${N.R}[instr[2]] = function(...)
         return ${N.execute}(childProto, capturedUpvals, ...)
     end
     return ${N.dispatch}(${N.frame}, pc + 1 + n)
@@ -2876,22 +2994,22 @@ end
 
 -- VARARG
 ${N.handlers}[${op(32 /* VARARG */)}] = function(${N.frame}, pc, instr)
-    local count = instr.${N.b} == 0 and ${N.frame}.${N.nVarargs} or (instr.${N.b} - 1)
+    local count = instr[3] == 0 and ${N.frame}.${N.nVarargs} or (instr[3] - 1)
     for i = 1, count do
-        ${N.frame}.${N.R}[instr.${N.a} + i - 1] = ${N.frame}.${N.varargs}[i]
+        ${N.frame}.${N.R}[instr[2] + i - 1] = ${N.frame}.${N.varargs}[i]
     end
-    if instr.${N.b} == 0 then
-        ${N.frame}.${N.multiTop} = instr.${N.a} + count
+    if instr[3] == 0 then
+        ${N.frame}.${N.multiTop} = instr[2] + count
     end
     return ${N.dispatch}(${N.frame}, pc + 1)
 end
 
 -- SETLIST
 ${N.handlers}[${op(33 /* SETLIST */)}] = function(${N.frame}, pc, instr)
-    local tbl = ${N.frame}.${N.R}[instr.${N.a}]
-    local valuesBase = instr.${N.b}
+    local tbl = ${N.frame}.${N.R}[instr[2]]
+    local valuesBase = instr[3]
     local top = ${N.frame}.${N.multiTop} or (valuesBase + 1)
-    local startIdx = instr.${N.c}
+    local startIdx = instr[4]
     local n = top - valuesBase
     for i = 0, n - 1 do
         tbl[startIdx + i] = ${N.frame}.${N.R}[valuesBase + i]
@@ -2965,10 +3083,6 @@ function generateVmNames(random = Math.random) {
     varargs: id(),
     nVarargs: id(),
     multiTop: id(),
-    op: id(),
-    a: id(),
-    b: id(),
-    c: id(),
     numParams: id(),
     hasVarargs: id(),
     maxRegs: id(),
@@ -2980,6 +3094,12 @@ function generateVmNames(random = Math.random) {
 }
 
 // src/passes/Vmify.ts
+function markRuntimeNumbersAsStructural(body) {
+  transformExpressions({ body }, (expr) => {
+    if (expr.type === "NumberLiteral") vmStructuralNumbers.add(expr);
+    return void 0;
+  });
+}
 function runVmify(program, options) {
   const globalNames = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS;
   const random = options.random ?? Math.random;
@@ -2993,6 +3113,7 @@ function runVmify(program, options) {
   const runtimeSource = buildVmRuntimeSource(names, opcodeMap);
   const runtimeProgram = import_luau_parser4.luauparser.parse(runtimeSource);
   const runtimeStatements = runtimeProgram.body.statements;
+  markRuntimeNumbersAsStructural(runtimeProgram.body);
   const protoLiteral = serializeProto(topProto, names);
   const newBody = [
     localStatement(names.globals, globalsTable),
@@ -3007,10 +3128,10 @@ function runVmify(program, options) {
 var PASS_ORDER = [
   "Vmify",
   "GlobalMapping",
-  "StringsToExpressions",
-  "NumbersToExpressions",
   "RenameVariables",
   "ConstantArray",
+  "StringsToExpressions",
+  "NumbersToExpressions",
   "EncryptStrings",
   "EncryptNumbers",
   "InsertJunk",

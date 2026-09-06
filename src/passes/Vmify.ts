@@ -1,4 +1,4 @@
-import type { Program, Statement } from "luau-parser"
+import type { Program, Statement, Expression } from "luau-parser"
 import { luauparser } from "luau-parser"
 import { VmCompiler, DEFAULT_BUILTIN_GLOBALS } from "./vmify/compiler"
 import { serializeProto } from "./vmify/serialize"
@@ -7,7 +7,20 @@ import { createOpcodeMap } from "./vmify/opcodes"
 import { generateVmNames } from "./vmify/names"
 import {
     localStatement, identifier, call, table, namedField, returnStatement, vararg,
+    vmStructuralNumbers,
 } from "./nodeFactory"
+import { transformExpressions } from "./walk"
+
+/** 파싱된 서브트리(런타임 인터프리터 소스) 안의 모든 NumberLiteral을 vmStructuralNumbers로
+ *  표시한다 — 인터프리터 자신의 +1/-1/패딩 같은 구현 디테일 상수는 사용자 데이터가 아닌데,
+ *  수십 개 opcode 핸들러에 반복 등장해서 EncryptNumbers/NumbersToExpressions/ConstantArray가
+ *  건드리면 곱셈적으로 부풀어 오른다. */
+function markRuntimeNumbersAsStructural(body: { statements: Statement[] }): void {
+    transformExpressions({ body } as Program, (expr) => {
+        if (expr.type === "NumberLiteral") vmStructuralNumbers.add(expr)
+        return undefined
+    })
+}
 
 export interface VmifyOptions {
     /**
@@ -59,6 +72,7 @@ export function runVmify(program: Program, options: VmifyOptions): void {
     const runtimeSource = buildVmRuntimeSource(names, opcodeMap)
     const runtimeProgram = luauparser.parse(runtimeSource)
     const runtimeStatements: Statement[] = runtimeProgram.body.statements
+    markRuntimeNumbersAsStructural(runtimeProgram.body)
 
     const protoLiteral = serializeProto(topProto, names)
 
