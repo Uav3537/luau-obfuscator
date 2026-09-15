@@ -26,16 +26,22 @@ function serializeConstValue(v: ConstValue): Expression {
  * 테이블을 바로 찾아낼 수 있기 때문. runtime.ts가 같은 names로 instr.<key>를 읽으므로
  * 반드시 컴파일 시점에 쓴 것과 동일한 VmNames 인스턴스를 넘겨야 한다.
  */
-function serializeInstrs(proto: Proto): Expression {
-    const fields: TableField[] = proto.code.map((instr) =>
-        positionalField(
-            table([
-                positionalField(vmNumberLiteral(instr.op as number)),
-                positionalField(vmNumberLiteral(instr.a)),
-                positionalField(vmNumberLiteral(instr.b)),
-                positionalField(vmNumberLiteral(instr.c)),
-            ]),
-        ))
+function serializeInstrs(proto: Proto, debug: boolean): Expression {
+    const fields: TableField[] = proto.code.map((instr) => {
+        const tuple = [
+            positionalField(vmNumberLiteral(instr.op as number)),
+            positionalField(vmNumberLiteral(instr.a)),
+            positionalField(vmNumberLiteral(instr.b)),
+            positionalField(vmNumberLiteral(instr.c)),
+        ]
+        if (debug) {
+            // [5] = 소스 줄(없으면 0), [6] = 호출 대상 이름(없으면 ""). 런타임이 non-callable을
+            // 잡았을 때 이 두 값으로 원본 위치를 찍는다. instr[1..4]는 그대로라 안 건드림.
+            tuple.push(positionalField(numberLiteral(instr.dbgLine ?? 0)))
+            tuple.push(positionalField(stringLiteral(instr.dbgName ?? "")))
+        }
+        return positionalField(table(tuple))
+    })
     return table(fields)
 }
 
@@ -52,15 +58,15 @@ function serializeUpvalDescs(proto: Proto, names: VmNames): Expression {
 
 /** Proto 하나를 { numParams=.., hasVarargs=.., maxRegs=.., code={...}, consts={...}, upvalDescs={...}, protos={...} }로
  *  (필드 키는 전부 names에서 온 무작위 이름). */
-export function serializeProto(proto: Proto, names: VmNames): Expression {
+export function serializeProto(proto: Proto, names: VmNames, debug = false): Expression {
     const fields: TableField[] = [
         namedField(names.numParams, vmNumberLiteral(proto.numParams)),
         namedField(names.hasVarargs, booleanLiteral(proto.hasVarargs)),
         namedField(names.maxRegs, vmNumberLiteral(proto.maxRegs)),
-        namedField(names.code, serializeInstrs(proto)),
+        namedField(names.code, serializeInstrs(proto, debug)),
         namedField(names.consts, serializeConsts(proto.consts)),
         namedField(names.upvalDescs, serializeUpvalDescs(proto, names)),
-        namedField(names.protos, table(proto.protos.map((p) => positionalField(serializeProto(p, names))))),
+        namedField(names.protos, table(proto.protos.map((p) => positionalField(serializeProto(p, names, debug))))),
     ]
     return table(fields)
 }

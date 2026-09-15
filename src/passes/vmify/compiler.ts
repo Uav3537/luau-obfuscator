@@ -33,6 +33,8 @@ interface FuncState {
     upvalIndexByBinding: Map<BindingId, number>
     breakPatchStack: number[][]
     continuePatchStack: number[][]
+    /** debug 빌드에서 emit()이 인스트럭션에 박아넣을 "현재 컴파일 중인 소스 줄". */
+    curLine?: number
 }
 
 export class VmCompiler {
@@ -64,6 +66,7 @@ export class VmCompiler {
         private program: Program,
         builtinGlobals: readonly string[] = DEFAULT_BUILTIN_GLOBALS,
         private opcodeMap?: OpcodeMap,
+        private debug = false,
     ) {
         this.analysis = luauparser.analyzeScopes(program, { builtinGlobals })
         this.enclosing = buildEnclosingFunctionMap(program)
@@ -115,8 +118,32 @@ export class VmCompiler {
         // 물리 번호로 바꿔서 저장한다. 직접 VmCompiler를 쓰는 테스트/디버깅 코드가
         // opcodeMap 없이 호출할 수도 있으니 없으면 항등(그대로) 매핑으로 폴백.
         const physicalOp = this.opcodeMap ? this.opcodeMap[op] : op
-        state.proto.code.push({ op: physicalOp, a, b, c, comment } as Instr)
+        state.proto.code.push({ op: physicalOp, a, b, c, comment, dbgLine: this.debug ? state.curLine : undefined } as Instr)
         return state.proto.code.length - 1
+    }
+
+    /** debug 빌드: 방금 emit한 CALL 인스트럭션에 "호출 대상 표현식 문자열"과 그 소스 줄을
+     *  박아넣는다(런타임이 non-callable을 잡았을 때 사람이 읽을 위치를 찍게). */
+    private stampCall(state: FuncState, idx: number, callExpr: Expression, calleeExpr: Expression): void {
+        if (!this.debug) return
+        const instr = state.proto.code[idx]
+        instr.dbgName = this.describeExpr(calleeExpr)
+        const line = (calleeExpr as { line?: { start: number } }).line ?? (callExpr as { line?: { start: number } }).line
+        if (line) instr.dbgLine = line.start
+    }
+
+    /** 표현식을 사람이 읽을 짧은 문자열로. 위치 추적용이라 완벽할 필요는 없음. */
+    private describeExpr(e: Expression): string {
+        switch (e.type) {
+            case "Identifier": return e.name
+            case "MemberExpression": return `${this.describeExpr(e.object)}.${e.property.name}`
+            case "MethodCallExpression": return `${this.describeExpr(e.object)}:${e.method.name}(...)`
+            case "IndexExpression": return `${this.describeExpr(e.object)}[...]`
+            case "CallExpression": return `${this.describeExpr(e.callee)}(...)`
+            case "ParenthesizedExpression": return `(${this.describeExpr(e.expression)})`
+            case "StringLiteral": return `"${String(e.value).slice(0, 20)}"`
+            default: return `<${e.type}>`
+        }
     }
 
     private konst(state: FuncState, value: ConstValue): number {
@@ -219,6 +246,7 @@ export class VmCompiler {
     }
 
     private compileStatement(stmt: Statement, state: FuncState): void {
+        if (this.debug && (stmt as { line?: { start: number } }).line) state.curLine = (stmt as { line: { start: number } }).line.start
         switch (stmt.type) {
             case "LocalStatement": {
                 // 순서 중요: 로컬(및 캡처된 것의 박스)을 "먼저" 선언해서 레지스터를 확정한 뒤에
@@ -253,11 +281,39 @@ export class VmCompiler {
                 return
             }
             case "AssignmentStatement": {
-                const valueRegs = stmt.values.map((e) => this.compileExpr(e, state))
-                stmt.targets.forEach((target, i) => {
-                    const srcReg = valueRegs[i] ?? valueRegs[valueRegs.length - 1]
-                    this.compileAssignTarget(target, srcReg, state)
-                })
+                // LocalStatement와 동일한 다중값 규칙을 따라야 한다: 우변의 "마지막" 식이
+                // Call/MethodCall/Vararg면 남는 대상 개수만큼 펼쳐야 하고(`a, b = f()` →
+                // a=1번째, b=2번째 반환값), 그 외엔 각자 1개씩. 예전 구현은 각 값을 따로
+                // compileExpr해서 대상 개수보다 값이 적으면 "마지막 값 하나를 재사용"했는데,
+                // 그 바람에 `Tools, Manager = Nova.Create()`에서 Manager가 2번째 반환값이
+                // 아니라 Tools(1번째)를 그대로 받아 "attempt to call a nil value"로 터졌다.
+                //
+                // 모든 우변을 먼저 연속 레지스터 블록(base..)에 계산한 뒤 대상에 대입한다 —
+                // 이 순서라야 `a, b = b, a`(스왑)처럼 대입 전에 우변을 전부 평가하는
+                // Lua 의미가 보존된다.
+                const targets = stmt.targets
+                const values = stmt.values
+                const base = state.regs.top()
+                if (values.length > 0) {
+                    for (let i = 0; i < values.length - 1; i++) {
+                        this.compileExprTo(values[i], state, base + i)
+                    }
+                    const lastIdx = values.length - 1
+                    const remaining = Math.max(targets.length - lastIdx, 1)
+                    this.compileExprMultiInto(values[lastIdx], state, base + lastIdx, remaining)
+                }
+                // 값보다 대상이 많으면 나머지 대상은 nil.
+                const produced = values.length === 0 ? 0 : (values.length - 1) + Math.max(targets.length - (values.length - 1), 1)
+                for (let i = produced; i < targets.length; i++) {
+                    this.emit(state, Opcode.LOADNIL, base + i, base + i, 0)
+                }
+                // 대입: 대상 프리픽스(테이블/키) 평가용 임시가 아직 안 쓴 값 슬롯을 덮지
+                // 않도록, 매 대입 전에 freereg를 값 블록 위(base+targets.length)로 올려둔다.
+                for (let i = 0; i < targets.length; i++) {
+                    state.regs.freeTemp(base + targets.length)
+                    this.compileAssignTarget(targets[i], base + i, state)
+                }
+                state.regs.freeTemp(base)
                 return
             }
             case "CompoundAssignmentStatement":
@@ -635,7 +691,7 @@ export class VmCompiler {
         // CallExpression과 동일한 이유로 top()을 미리 캐싱하지 않고 callee의 반환값을 base로 씀.
         const base = this.compileExpr(callExpr.callee, state)
         this.compileArgsContiguous(callExpr.arguments, state, base + 1)
-        this.emit(state, Opcode.CALL, base, callExpr.arguments.length + 1, wantCount + 1)
+        this.stampCall(state, this.emit(state, Opcode.CALL, base, callExpr.arguments.length + 1, wantCount + 1), callExpr, callExpr.callee)
         return base
     }
 
@@ -694,7 +750,7 @@ export class VmCompiler {
         if (expr.type === "CallExpression") {
             const calleeReg = this.compileExpr(expr.callee, state)
             const b = this.compileCallArgsAndGetB(expr.arguments, state, calleeReg + 1)
-            this.emit(state, Opcode.CALL, calleeReg, b, wantCount + 1)
+            this.stampCall(state, this.emit(state, Opcode.CALL, calleeReg, b, wantCount + 1), expr, expr.callee)
             for (let i = 0; i < wantCount; i++) {
                 if (calleeReg + i !== base + i) this.emit(state, Opcode.MOVE, base + i, calleeReg + i, 0)
             }
@@ -709,7 +765,7 @@ export class VmCompiler {
             state.regs.allocTemp()
             const argB = this.compileCallArgsAndGetB(expr.arguments, state, fnSlot + 2)
             const b = argB === 0 ? 0 : expr.arguments.length + 2
-            this.emit(state, Opcode.CALL, fnSlot, b, wantCount + 1)
+            this.stampCall(state, this.emit(state, Opcode.CALL, fnSlot, b, wantCount + 1), expr, expr)
             for (let i = 0; i < wantCount; i++) {
                 if (fnSlot + i !== base + i) this.emit(state, Opcode.MOVE, base + i, fnSlot + i, 0)
             }
@@ -740,7 +796,7 @@ export class VmCompiler {
             if (calleeReg !== base) this.emit(state, Opcode.MOVE, base, calleeReg, 0)
             state.regs.freeTemp(base + 1)
             const b = this.compileCallArgsAndGetB(expr.arguments, state, base + 1)
-            this.emit(state, Opcode.CALL, base, b, 0)
+            this.stampCall(state, this.emit(state, Opcode.CALL, base, b, 0), expr, expr.callee)
             return
         }
         if (expr.type === "MethodCallExpression") {
@@ -756,7 +812,7 @@ export class VmCompiler {
             state.regs.freeTemp(base + 2)
             const argB = this.compileCallArgsAndGetB(expr.arguments, state, base + 2)
             const b = argB === 0 ? 0 : expr.arguments.length + 2
-            this.emit(state, Opcode.CALL, base, b, 0)
+            this.stampCall(state, this.emit(state, Opcode.CALL, base, b, 0), expr, expr)
             return
         }
         if (expr.type === "VarargExpression") {
@@ -785,6 +841,7 @@ export class VmCompiler {
     }
 
     private compileExpr(expr: Expression, state: FuncState, discard = false): number {
+        if (this.debug && (expr as { line?: { start: number } }).line) state.curLine = (expr as { line: { start: number } }).line.start
         switch (expr.type) {
             case "NilLiteral": {
                 const r = state.regs.allocTemp()
@@ -914,7 +971,8 @@ export class VmCompiler {
                 // 쓴 임시 레지스터 때문에 함수 값 자체는 그 다음 슬롯에 옴).
                 const base = this.compileExpr(expr.callee, state)
                 const b = this.compileCallArgsAndGetB(expr.arguments, state, base + 1)
-                this.emit(state, Opcode.CALL, base, b, discard ? 1 : 2)
+                const callIdx = this.emit(state, Opcode.CALL, base, b, discard ? 1 : 2)
+                this.stampCall(state, callIdx, expr, expr.callee)
                 state.regs.freeTemp(base + (discard ? 0 : 1))
                 return base
             }
@@ -928,7 +986,8 @@ export class VmCompiler {
                 // self가 항상 고정으로 하나 더 붙으므로: 열려있으면(0) 그대로 0(런타임이
                 // multiTop까지 다 잡아줌, self도 그 범위 안에 포함됨), 아니면 +1(self 몫).
                 const b = argB === 0 ? 0 : expr.arguments.length + 2
-                this.emit(state, Opcode.CALL, fnSlot, b, discard ? 1 : 2)
+                const callIdx = this.emit(state, Opcode.CALL, fnSlot, b, discard ? 1 : 2)
+                this.stampCall(state, callIdx, expr, expr)
                 state.regs.freeTemp(fnSlot + (discard ? 0 : 1))
                 return fnSlot
             }

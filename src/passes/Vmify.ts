@@ -37,6 +37,13 @@ export interface VmifyOptions {
      * Math.random. 재현 가능한 빌드가 필요하면(테스트 등) 시드 고정 PRNG를 넘길 것.
      */
     random?: () => number
+    /**
+     * 디버그 빌드. 켜면 각 인스트럭션에 원본 소스 줄 번호를, CALL에는 호출 대상 이름을
+     * 함께 직렬화하고, 런타임 CALL 핸들러가 non-callable 값을 부르려 할 때 그냥
+     * "attempt to call a nil value"가 아니라 "[vmdebug] ... '대상이름' (source line N)"으로
+     * 원본 위치를 찍어준다. 산출물이 조금 커지고 VM 시그니처가 노출되므로 진단용으로만 쓸 것.
+     */
+    debug?: boolean
 }
 
 /**
@@ -59,10 +66,11 @@ export function runVmify(program: Program, options: VmifyOptions): void {
     const builtinGlobals = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS
     const random = options.random ?? Math.random
 
+    const debug = options.debug ?? false
     const opcodeMap = createOpcodeMap(random)
     const names = generateVmNames(random)
 
-    const compiler = new VmCompiler(program, builtinGlobals, opcodeMap)
+    const compiler = new VmCompiler(program, builtinGlobals, opcodeMap, debug)
     const topProto = compiler.compile()
 
     // builtinGlobals(시드 목록)가 아니라 실제로 프로그램이 참조한 전역 전체로 브릿지를
@@ -74,12 +82,12 @@ export function runVmify(program: Program, options: VmifyOptions): void {
         usedGlobalNames.map((name) => namedField(name, identifier(name))),
     )
 
-    const runtimeSource = buildVmRuntimeSource(names, opcodeMap)
+    const runtimeSource = buildVmRuntimeSource(names, opcodeMap, debug)
     const runtimeProgram = luauparser.parse(runtimeSource)
     const runtimeStatements: Statement[] = runtimeProgram.body.statements
     markRuntimeNumbersAsStructural(runtimeProgram.body)
 
-    const protoLiteral = serializeProto(topProto, names)
+    const protoLiteral = serializeProto(topProto, names, debug)
 
     const newBody: Statement[] = [
         localStatement(names.globals, globalsTable),

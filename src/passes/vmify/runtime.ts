@@ -2,17 +2,24 @@ import { Opcode, type OpcodeMap } from "./opcodes"
 import type { VmNames } from "./names"
 
 /**
- * VM 런타임 v3 — opcode마다 독립된 핸들러 함수를 만들고 서로 tail call로 이어지는
- * 구조는 v2와 동일하다. 다만 이제 모든 전역 식별자(__vm_execute, __vm_handlers, ...)와
- * frame/Instr/Proto의 테이블 필드 키가 고정 문자열이 아니라, 빌드마다 무작위로 뽑힌
- * names(names.ts)와 opcode 번호 재배치 opcodeMap(opcodes.ts)을 받아 그때그때
- * 소스를 새로 찍어낸다.
+ * VM 런타임 v4 — opcode마다 독립된 핸들러 함수를 만드는 구조는 v3와 동일하다.
+ * 모든 전역 식별자(__vm_execute, __vm_handlers, ...)와 frame/Instr/Proto의 테이블
+ * 필드 키가 고정 문자열이 아니라, 빌드마다 무작위로 뽑힌 names(names.ts)와 opcode 번호
+ * 재배치 opcodeMap(opcodes.ts)을 받아 그때그때 소스를 새로 찍어낸다.
  *
- * 왜 이렇게 하나:
- *  - Luau는 proper tail call을 보장하므로(스택 안 쌓임, 성능도 loop와 동급),
- *    "재귀처럼 보이지만 실제론 loop"인 구조를 공짜로 얻을 수 있다.
+ * v3와의 결정적 차이 — dispatch를 tail call 재귀가 아니라 while 루프로 돌린다:
+ *  - v3는 "Luau가 proper tail call을 보장하므로 return dispatch(frame, pc+1)가
+ *    스택을 안 쌓는다"는 전제로 각 핸들러가 dispatch를 꼬리 호출로 이어붙였다.
+ *    그런데 Luau는 (Lua 5.x와 달리) proper tail call을 하지 않는다. 정확한 스택
+ *    트레이스/디버깅을 위해 의도적으로 뺐다. 그래서 명령어 하나 실행할 때마다
+ *    dispatch 프레임이 실제로 하나씩 쌓였고, 명령어 수백 개짜리 함수만 돌려도
+ *    stack overflow가 났다.
+ *  - v4에서는 dispatch가 while 루프를 돌며 핸들러를 호출한다. 핸들러는 dispatch를
+ *    부르지 않고 "다음 pc(숫자)"를 반환하고, RETURN만 결과 패킷(table.pack 결과)을
+ *    반환한다. 루프는 반환값이 숫자면 pc를 갱신하고, 테이블이면 그걸 풀어서 반환한다.
+ *    이제 함수 하나를 끝까지 도는 동안 스택 깊이는 일정하다.
  *  - "거대한 while+if-chain" 자체가 디컴파일러가 제일 먼저 찾는 VM 시그니처인데,
- *    이 구조는 그 패턴이 아예 없다.
+ *    루프 본문이 if-chain이 아니라 handlers[op](...) 단일 디스패치라 그 패턴은 아니다.
  *  - opcode 번호 + 식별자 이름을 빌드마다 다르게 뽑기 때문에, 한 번 리버싱해서
  *    "MOVE=0, __vm_execute라는 함수가 진입점" 같은 지식을 얻어도 다음 산출물에는
  *    그대로 안 먹힌다 — 매번 새로 분석해야 함.
@@ -21,16 +28,28 @@ import type { VmNames } from "./names"
  * (compiler.ts가 emit() 시점에 같은 opcodeMap으로 인스트럭션에 번호를 박아 넣으므로
  * 반드시 컴파일과 런타임 생성에 동일한 opcodeMap 인스턴스를 넘겨야 함).
  */
-export function buildVmRuntimeSource(names: VmNames, opcodeMap: OpcodeMap): string {
+export function buildVmRuntimeSource(names: VmNames, opcodeMap: OpcodeMap, debug = false): string {
     const N = names
     const op = (o: Opcode) => opcodeMap[o]
 
     return `
 local ${N.handlers} = {}
 
+-- 각 핸들러는 "다음 pc(숫자)"를 반환한다. RETURN 핸들러만 table.pack 결과(테이블)를
+-- 반환하며, 그게 함수 실행 종료 신호다. Luau는 proper tail call을 하지 않으므로
+-- 핸들러들이 서로 꼬리 호출로 이어지면 명령어당 스택 프레임이 쌓여 터진다 — 그래서
+-- 여기서 while 루프로 돌려 스택 깊이를 함수 실행 내내 일정하게 유지한다.
 local function ${N.dispatch}(${N.frame}, pc)
-    local instr = ${N.frame}.${N.code}[pc]
-    return ${N.handlers}[instr[1]](${N.frame}, pc, instr)
+    local ${N.handlers} = ${N.handlers}
+    while true do
+        local instr = ${N.frame}.${N.code}[pc]
+        local next = ${N.handlers}[instr[1]](${N.frame}, pc, instr)
+        if type(next) == "number" then
+            pc = next
+        else
+            return table.unpack(next, 1, next.n)
+        end
+    end
 end
 
 local function ${N.rk}(${N.frame}, x)
@@ -44,67 +63,67 @@ end
 -- MOVE
 ${N.handlers}[${op(Opcode.MOVE)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LOADK
 ${N.handlers}[${op(Opcode.LOADK)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.K}[instr[3] + 1]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LOADBOOL
 ${N.handlers}[${op(Opcode.LOADBOOL)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = (instr[3] ~= 0)
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LOADNIL
 ${N.handlers}[${op(Opcode.LOADNIL)}] = function(${N.frame}, pc, instr)
     for i = instr[2], instr[3] do ${N.frame}.${N.R}[i] = nil end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- GETUPVAL
 ${N.handlers}[${op(Opcode.GETUPVAL)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.upvals}[instr[3] + 1]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETUPVAL
 ${N.handlers}[${op(Opcode.SETUPVAL)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.upvals}[instr[3] + 1] = ${N.frame}.${N.R}[instr[2]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- GETGLOBAL (b는 RK가 아니라 상수풀 순수 인덱스)
 ${N.handlers}[${op(Opcode.GETGLOBAL)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETGLOBAL
 ${N.handlers}[${op(Opcode.SETGLOBAL)}] = function(${N.frame}, pc, instr)
     ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]] = ${N.frame}.${N.R}[instr[2]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- GETTABLE
 ${N.handlers}[${op(Opcode.GETTABLE)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]][${N.rk}(${N.frame}, instr[4])]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETTABLE
 ${N.handlers}[${op(Opcode.SETTABLE)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]][${N.rk}(${N.frame}, instr[3])] = ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- NEWTABLE
 ${N.handlers}[${op(Opcode.NEWTABLE)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = {}
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SELF  (R[a] = R[b][key]; R[a+1] = R[b])
@@ -112,90 +131,90 @@ ${N.handlers}[${op(Opcode.SELF)}] = function(${N.frame}, pc, instr)
     local obj = ${N.frame}.${N.R}[instr[3]]
     ${N.frame}.${N.R}[instr[2]] = obj[${N.rk}(${N.frame}, instr[4])]
     ${N.frame}.${N.R}[instr[2] + 1] = obj
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- ADD SUB MUL DIV MOD POW
 ${N.handlers}[${op(Opcode.ADD)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) + ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(Opcode.SUB)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) - ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(Opcode.MUL)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) * ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(Opcode.DIV)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) / ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(Opcode.MOD)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) % ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(Opcode.POW)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) ^ ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- IDIV (Luau 바닥 나눗셈)
 ${N.handlers}[${op(Opcode.IDIV)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) // ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- CONCAT
 ${N.handlers}[${op(Opcode.CONCAT)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) .. ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- UNM
 ${N.handlers}[${op(Opcode.UNM)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = -${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- NOT
 ${N.handlers}[${op(Opcode.NOT)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = not ${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LEN
 ${N.handlers}[${op(Opcode.LEN)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = #${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- JMP (pc += a)
 ${N.handlers}[${op(Opcode.JMP)}] = function(${N.frame}, pc, instr)
-    return ${N.dispatch}(${N.frame}, pc + instr[2])
+    return pc + instr[2]
 end
 
 -- EQ LT LE (값 생성형 비교)
 ${N.handlers}[${op(Opcode.EQ)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) == ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(Opcode.LT)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) < ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(Opcode.LE)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) <= ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- TEST (if (not R[a]) != (c!=0) then pc += 2 else pc += 1 — 보통 다음 명령은 JMP)
 ${N.handlers}[${op(Opcode.TEST)}] = function(${N.frame}, pc, instr)
     if (not ${N.frame}.${N.R}[instr[2]]) ~= (instr[4] ~= 0) then
-        return ${N.dispatch}(${N.frame}, pc + 2)
+        return pc + 2
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- CALL
@@ -210,7 +229,13 @@ ${N.handlers}[${op(Opcode.CALL)}] = function(${N.frame}, pc, instr)
     end
     local args = table.create(nargs)
     for i = 1, nargs do args[i] = ${N.frame}.${N.R}[a + i] end
-    local rets = table.pack(fn(table.unpack(args, 1, nargs)))
+${debug ? `    if type(fn) ~= "function" then
+        local mt = getmetatable(fn)
+        if not (mt and mt.__call) then
+            error(("[vmdebug] attempt to call a %s value: '%s' (source line %d)"):format(type(fn), tostring(instr[6]), tonumber(instr[5]) or -1), 0)
+        end
+    end
+` : ""}    local rets = table.pack(fn(table.unpack(args, 1, nargs)))
     if c == 1 then
         -- discard
     elseif c == 0 then
@@ -220,23 +245,27 @@ ${N.handlers}[${op(Opcode.CALL)}] = function(${N.frame}, pc, instr)
         local want = c - 1
         for i = 1, want do ${N.frame}.${N.R}[a + i - 1] = rets[i] end
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- RETURN
+-- 다른 핸들러는 "다음 pc(숫자)"를 반환하지만, RETURN만은 결과값을 table.pack으로 싸서
+-- 테이블을 반환한다 — dispatch 루프는 반환값이 숫자가 아니면 이걸 함수 종료 신호로 보고
+-- table.unpack(next, 1, next.n)으로 풀어 최종 반환한다. table.pack이 n을 채워 주므로
+-- 중간 nil이 있어도 반환 개수가 정확히 보존된다.
 ${N.handlers}[${op(Opcode.RETURN)}] = function(${N.frame}, pc, instr)
     local a, b = instr[2], instr[3]
     if b == 0 then
-        return table.unpack(${N.frame}.${N.R}, a, (${N.frame}.${N.multiTop} or (a + 1)) - 1)
+        return table.pack(table.unpack(${N.frame}.${N.R}, a, (${N.frame}.${N.multiTop} or (a + 1)) - 1))
     end
-    return table.unpack(${N.frame}.${N.R}, a, a + b - 2)
+    return table.pack(table.unpack(${N.frame}.${N.R}, a, a + b - 2))
 end
 
 -- FORPREP
 ${N.handlers}[${op(Opcode.FORPREP)}] = function(${N.frame}, pc, instr)
     local a = instr[2]
     ${N.frame}.${N.R}[a] = ${N.frame}.${N.R}[a] - ${N.frame}.${N.R}[a + 2]
-    return ${N.dispatch}(${N.frame}, pc + instr[3])
+    return pc + instr[3]
 end
 
 -- FORLOOP
@@ -252,9 +281,9 @@ ${N.handlers}[${op(Opcode.FORLOOP)}] = function(${N.frame}, pc, instr)
     end
     if ok then
         ${N.frame}.${N.R}[a + 3] = ${N.frame}.${N.R}[a]
-        return ${N.dispatch}(${N.frame}, pc + instr[3])
+        return pc + instr[3]
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- CLOSURE
@@ -274,7 +303,7 @@ ${N.handlers}[${op(Opcode.CLOSURE)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = function(...)
         return ${N.execute}(childProto, capturedUpvals, ...)
     end
-    return ${N.dispatch}(${N.frame}, pc + 1 + n)
+    return pc + 1 + n
 end
 
 -- VARARG
@@ -286,7 +315,7 @@ ${N.handlers}[${op(Opcode.VARARG)}] = function(${N.frame}, pc, instr)
     if instr[3] == 0 then
         ${N.frame}.${N.multiTop} = instr[2] + count
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETLIST
@@ -299,7 +328,7 @@ ${N.handlers}[${op(Opcode.SETLIST)}] = function(${N.frame}, pc, instr)
     for i = 0, n - 1 do
         tbl[startIdx + i] = ${N.frame}.${N.R}[valuesBase + i]
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 function ${N.execute}(proto, upvals, ...)

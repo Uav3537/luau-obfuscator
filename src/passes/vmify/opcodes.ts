@@ -50,6 +50,10 @@ export interface Instr {
     c: number
     /** JMP/EQ/LT/LE/TEST/CALL 등에서 사람이 읽을 디버깅용 주석. 런타임엔 안 쓰임. */
     comment?: string
+    /** debug 빌드에서만: 이 인스트럭션이 나온 원본 소스(입력 .luau) 줄 번호. */
+    dbgLine?: number
+    /** debug 빌드에서만: CALL이면 호출 대상 표현식을 사람이 읽을 문자열로(예: "print", "obj:method"). */
+    dbgName?: string
 }
 
 /** RK 인코딩 헬퍼: 상수는 음수(-idx-1), 레지스터는 그대로 양수. */

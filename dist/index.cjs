@@ -1766,9 +1766,10 @@ var DEFAULT_BUILTIN_GLOBALS = [
   "next"
 ];
 var VmCompiler = class {
-  constructor(program, builtinGlobals = DEFAULT_BUILTIN_GLOBALS, opcodeMap) {
+  constructor(program, builtinGlobals = DEFAULT_BUILTIN_GLOBALS, opcodeMap, debug = false) {
     this.program = program;
     this.opcodeMap = opcodeMap;
+    this.debug = debug;
     this.analysis = import_luau_parser3.luauparser.analyzeScopes(program, { builtinGlobals });
     this.enclosing = buildEnclosingFunctionMap(program);
     for (const [id, binding] of this.analysis.bindings) {
@@ -1778,6 +1779,7 @@ var VmCompiler = class {
   }
   program;
   opcodeMap;
+  debug;
   analysis;
   enclosing;
   captured = /* @__PURE__ */ new Set();
@@ -1836,8 +1838,38 @@ var VmCompiler = class {
   }
   emit(state, op, a, b, c, comment) {
     const physicalOp = this.opcodeMap ? this.opcodeMap[op] : op;
-    state.proto.code.push({ op: physicalOp, a, b, c, comment });
+    state.proto.code.push({ op: physicalOp, a, b, c, comment, dbgLine: this.debug ? state.curLine : void 0 });
     return state.proto.code.length - 1;
+  }
+  /** debug 빌드: 방금 emit한 CALL 인스트럭션에 "호출 대상 표현식 문자열"과 그 소스 줄을
+   *  박아넣는다(런타임이 non-callable을 잡았을 때 사람이 읽을 위치를 찍게). */
+  stampCall(state, idx, callExpr, calleeExpr) {
+    if (!this.debug) return;
+    const instr = state.proto.code[idx];
+    instr.dbgName = this.describeExpr(calleeExpr);
+    const line = calleeExpr.line ?? callExpr.line;
+    if (line) instr.dbgLine = line.start;
+  }
+  /** 표현식을 사람이 읽을 짧은 문자열로. 위치 추적용이라 완벽할 필요는 없음. */
+  describeExpr(e) {
+    switch (e.type) {
+      case "Identifier":
+        return e.name;
+      case "MemberExpression":
+        return `${this.describeExpr(e.object)}.${e.property.name}`;
+      case "MethodCallExpression":
+        return `${this.describeExpr(e.object)}:${e.method.name}(...)`;
+      case "IndexExpression":
+        return `${this.describeExpr(e.object)}[...]`;
+      case "CallExpression":
+        return `${this.describeExpr(e.callee)}(...)`;
+      case "ParenthesizedExpression":
+        return `(${this.describeExpr(e.expression)})`;
+      case "StringLiteral":
+        return `"${String(e.value).slice(0, 20)}"`;
+      default:
+        return `<${e.type}>`;
+    }
   }
   konst(state, value) {
     return internConst(state.proto, value);
@@ -1930,6 +1962,7 @@ var VmCompiler = class {
     state.regs.releaseLocalsTo(saved);
   }
   compileStatement(stmt, state) {
+    if (this.debug && stmt.line) state.curLine = stmt.line.start;
     switch (stmt.type) {
       case "LocalStatement": {
         const bindingIds = stmt.names.map((n) => this.bindingIdOfDecl(n));
@@ -1955,11 +1988,26 @@ var VmCompiler = class {
         return;
       }
       case "AssignmentStatement": {
-        const valueRegs = stmt.values.map((e) => this.compileExpr(e, state));
-        stmt.targets.forEach((target, i) => {
-          const srcReg = valueRegs[i] ?? valueRegs[valueRegs.length - 1];
-          this.compileAssignTarget(target, srcReg, state);
-        });
+        const targets = stmt.targets;
+        const values = stmt.values;
+        const base = state.regs.top();
+        if (values.length > 0) {
+          for (let i = 0; i < values.length - 1; i++) {
+            this.compileExprTo(values[i], state, base + i);
+          }
+          const lastIdx = values.length - 1;
+          const remaining = Math.max(targets.length - lastIdx, 1);
+          this.compileExprMultiInto(values[lastIdx], state, base + lastIdx, remaining);
+        }
+        const produced = values.length === 0 ? 0 : values.length - 1 + Math.max(targets.length - (values.length - 1), 1);
+        for (let i = produced; i < targets.length; i++) {
+          this.emit(state, 3 /* LOADNIL */, base + i, base + i, 0);
+        }
+        for (let i = 0; i < targets.length; i++) {
+          state.regs.freeTemp(base + targets.length);
+          this.compileAssignTarget(targets[i], base + i, state);
+        }
+        state.regs.freeTemp(base);
         return;
       }
       case "CompoundAssignmentStatement":
@@ -2303,7 +2351,7 @@ var VmCompiler = class {
   compileCallMultiInto(callExpr, state, wantCount) {
     const base = this.compileExpr(callExpr.callee, state);
     this.compileArgsContiguous(callExpr.arguments, state, base + 1);
-    this.emit(state, 27 /* CALL */, base, callExpr.arguments.length + 1, wantCount + 1);
+    this.stampCall(state, this.emit(state, 27 /* CALL */, base, callExpr.arguments.length + 1, wantCount + 1), callExpr, callExpr.callee);
     return base;
   }
   loadConst(state, value) {
@@ -2354,7 +2402,7 @@ var VmCompiler = class {
     if (expr.type === "CallExpression") {
       const calleeReg = this.compileExpr(expr.callee, state);
       const b = this.compileCallArgsAndGetB(expr.arguments, state, calleeReg + 1);
-      this.emit(state, 27 /* CALL */, calleeReg, b, wantCount + 1);
+      this.stampCall(state, this.emit(state, 27 /* CALL */, calleeReg, b, wantCount + 1), expr, expr.callee);
       for (let i = 0; i < wantCount; i++) {
         if (calleeReg + i !== base + i) this.emit(state, 0 /* MOVE */, base + i, calleeReg + i, 0);
       }
@@ -2369,7 +2417,7 @@ var VmCompiler = class {
       state.regs.allocTemp();
       const argB = this.compileCallArgsAndGetB(expr.arguments, state, fnSlot + 2);
       const b = argB === 0 ? 0 : expr.arguments.length + 2;
-      this.emit(state, 27 /* CALL */, fnSlot, b, wantCount + 1);
+      this.stampCall(state, this.emit(state, 27 /* CALL */, fnSlot, b, wantCount + 1), expr, expr);
       for (let i = 0; i < wantCount; i++) {
         if (fnSlot + i !== base + i) this.emit(state, 0 /* MOVE */, base + i, fnSlot + i, 0);
       }
@@ -2395,7 +2443,7 @@ var VmCompiler = class {
       if (calleeReg !== base) this.emit(state, 0 /* MOVE */, base, calleeReg, 0);
       state.regs.freeTemp(base + 1);
       const b = this.compileCallArgsAndGetB(expr.arguments, state, base + 1);
-      this.emit(state, 27 /* CALL */, base, b, 0);
+      this.stampCall(state, this.emit(state, 27 /* CALL */, base, b, 0), expr, expr.callee);
       return;
     }
     if (expr.type === "MethodCallExpression") {
@@ -2411,7 +2459,7 @@ var VmCompiler = class {
       state.regs.freeTemp(base + 2);
       const argB = this.compileCallArgsAndGetB(expr.arguments, state, base + 2);
       const b = argB === 0 ? 0 : expr.arguments.length + 2;
-      this.emit(state, 27 /* CALL */, base, b, 0);
+      this.stampCall(state, this.emit(state, 27 /* CALL */, base, b, 0), expr, expr);
       return;
     }
     if (expr.type === "VarargExpression") {
@@ -2438,6 +2486,7 @@ var VmCompiler = class {
     return args.length + 1;
   }
   compileExpr(expr, state, discard = false) {
+    if (this.debug && expr.line) state.curLine = expr.line.start;
     switch (expr.type) {
       case "NilLiteral": {
         const r = state.regs.allocTemp();
@@ -2595,7 +2644,8 @@ var VmCompiler = class {
       case "CallExpression": {
         const base = this.compileExpr(expr.callee, state);
         const b = this.compileCallArgsAndGetB(expr.arguments, state, base + 1);
-        this.emit(state, 27 /* CALL */, base, b, discard ? 1 : 2);
+        const callIdx = this.emit(state, 27 /* CALL */, base, b, discard ? 1 : 2);
+        this.stampCall(state, callIdx, expr, expr.callee);
         state.regs.freeTemp(base + (discard ? 0 : 1));
         return base;
       }
@@ -2607,7 +2657,8 @@ var VmCompiler = class {
         state.regs.allocTemp();
         const argB = this.compileCallArgsAndGetB(expr.arguments, state, fnSlot + 2);
         const b = argB === 0 ? 0 : expr.arguments.length + 2;
-        this.emit(state, 27 /* CALL */, fnSlot, b, discard ? 1 : 2);
+        const callIdx = this.emit(state, 27 /* CALL */, fnSlot, b, discard ? 1 : 2);
+        this.stampCall(state, callIdx, expr, expr);
         state.regs.freeTemp(fnSlot + (discard ? 0 : 1));
         return fnSlot;
       }
@@ -2720,15 +2771,20 @@ function serializeConstValue(v) {
   if (typeof v === "number") return numberLiteral(v);
   return booleanLiteral(v);
 }
-function serializeInstrs(proto) {
-  const fields = proto.code.map((instr) => positionalField(
-    table([
+function serializeInstrs(proto, debug) {
+  const fields = proto.code.map((instr) => {
+    const tuple = [
       positionalField(vmNumberLiteral(instr.op)),
       positionalField(vmNumberLiteral(instr.a)),
       positionalField(vmNumberLiteral(instr.b)),
       positionalField(vmNumberLiteral(instr.c))
-    ])
-  ));
+    ];
+    if (debug) {
+      tuple.push(positionalField(numberLiteral(instr.dbgLine ?? 0)));
+      tuple.push(positionalField(stringLiteral(instr.dbgName ?? "")));
+    }
+    return positionalField(table(tuple));
+  });
   return table(fields);
 }
 function serializeUpvalDescs(proto, names) {
@@ -2740,29 +2796,41 @@ function serializeUpvalDescs(proto, names) {
   ));
   return table(fields);
 }
-function serializeProto(proto, names) {
+function serializeProto(proto, names, debug = false) {
   const fields = [
     namedField(names.numParams, vmNumberLiteral(proto.numParams)),
     namedField(names.hasVarargs, booleanLiteral(proto.hasVarargs)),
     namedField(names.maxRegs, vmNumberLiteral(proto.maxRegs)),
-    namedField(names.code, serializeInstrs(proto)),
+    namedField(names.code, serializeInstrs(proto, debug)),
     namedField(names.consts, serializeConsts(proto.consts)),
     namedField(names.upvalDescs, serializeUpvalDescs(proto, names)),
-    namedField(names.protos, table(proto.protos.map((p) => positionalField(serializeProto(p, names)))))
+    namedField(names.protos, table(proto.protos.map((p) => positionalField(serializeProto(p, names, debug)))))
   ];
   return table(fields);
 }
 
 // src/passes/vmify/runtime.ts
-function buildVmRuntimeSource(names, opcodeMap) {
+function buildVmRuntimeSource(names, opcodeMap, debug = false) {
   const N = names;
   const op = (o) => opcodeMap[o];
   return `
 local ${N.handlers} = {}
 
+-- \uAC01 \uD578\uB4E4\uB7EC\uB294 "\uB2E4\uC74C pc(\uC22B\uC790)"\uB97C \uBC18\uD658\uD55C\uB2E4. RETURN \uD578\uB4E4\uB7EC\uB9CC table.pack \uACB0\uACFC(\uD14C\uC774\uBE14)\uB97C
+-- \uBC18\uD658\uD558\uBA70, \uADF8\uAC8C \uD568\uC218 \uC2E4\uD589 \uC885\uB8CC \uC2E0\uD638\uB2E4. Luau\uB294 proper tail call\uC744 \uD558\uC9C0 \uC54A\uC73C\uBBC0\uB85C
+-- \uD578\uB4E4\uB7EC\uB4E4\uC774 \uC11C\uB85C \uAF2C\uB9AC \uD638\uCD9C\uB85C \uC774\uC5B4\uC9C0\uBA74 \uBA85\uB839\uC5B4\uB2F9 \uC2A4\uD0DD \uD504\uB808\uC784\uC774 \uC313\uC5EC \uD130\uC9C4\uB2E4 \u2014 \uADF8\uB798\uC11C
+-- \uC5EC\uAE30\uC11C while \uB8E8\uD504\uB85C \uB3CC\uB824 \uC2A4\uD0DD \uAE4A\uC774\uB97C \uD568\uC218 \uC2E4\uD589 \uB0B4\uB0B4 \uC77C\uC815\uD558\uAC8C \uC720\uC9C0\uD55C\uB2E4.
 local function ${N.dispatch}(${N.frame}, pc)
-    local instr = ${N.frame}.${N.code}[pc]
-    return ${N.handlers}[instr[1]](${N.frame}, pc, instr)
+    local ${N.handlers} = ${N.handlers}
+    while true do
+        local instr = ${N.frame}.${N.code}[pc]
+        local next = ${N.handlers}[instr[1]](${N.frame}, pc, instr)
+        if type(next) == "number" then
+            pc = next
+        else
+            return table.unpack(next, 1, next.n)
+        end
+    end
 end
 
 local function ${N.rk}(${N.frame}, x)
@@ -2776,67 +2844,67 @@ end
 -- MOVE
 ${N.handlers}[${op(0 /* MOVE */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LOADK
 ${N.handlers}[${op(1 /* LOADK */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.K}[instr[3] + 1]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LOADBOOL
 ${N.handlers}[${op(2 /* LOADBOOL */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = (instr[3] ~= 0)
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LOADNIL
 ${N.handlers}[${op(3 /* LOADNIL */)}] = function(${N.frame}, pc, instr)
     for i = instr[2], instr[3] do ${N.frame}.${N.R}[i] = nil end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- GETUPVAL
 ${N.handlers}[${op(4 /* GETUPVAL */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.upvals}[instr[3] + 1]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETUPVAL
 ${N.handlers}[${op(5 /* SETUPVAL */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.upvals}[instr[3] + 1] = ${N.frame}.${N.R}[instr[2]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- GETGLOBAL (b\uB294 RK\uAC00 \uC544\uB2C8\uB77C \uC0C1\uC218\uD480 \uC21C\uC218 \uC778\uB371\uC2A4)
 ${N.handlers}[${op(6 /* GETGLOBAL */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETGLOBAL
 ${N.handlers}[${op(7 /* SETGLOBAL */)}] = function(${N.frame}, pc, instr)
     ${N.globals}[${N.frame}.${N.K}[instr[3] + 1]] = ${N.frame}.${N.R}[instr[2]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- GETTABLE
 ${N.handlers}[${op(8 /* GETTABLE */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]][${N.rk}(${N.frame}, instr[4])]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETTABLE
 ${N.handlers}[${op(9 /* SETTABLE */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]][${N.rk}(${N.frame}, instr[3])] = ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- NEWTABLE
 ${N.handlers}[${op(10 /* NEWTABLE */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = {}
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SELF  (R[a] = R[b][key]; R[a+1] = R[b])
@@ -2844,90 +2912,90 @@ ${N.handlers}[${op(11 /* SELF */)}] = function(${N.frame}, pc, instr)
     local obj = ${N.frame}.${N.R}[instr[3]]
     ${N.frame}.${N.R}[instr[2]] = obj[${N.rk}(${N.frame}, instr[4])]
     ${N.frame}.${N.R}[instr[2] + 1] = obj
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- ADD SUB MUL DIV MOD POW
 ${N.handlers}[${op(12 /* ADD */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) + ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(13 /* SUB */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) - ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(14 /* MUL */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) * ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(15 /* DIV */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) / ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(16 /* MOD */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) % ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(17 /* POW */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) ^ ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- IDIV (Luau \uBC14\uB2E5 \uB098\uB217\uC148)
 ${N.handlers}[${op(34 /* IDIV */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) // ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- CONCAT
 ${N.handlers}[${op(18 /* CONCAT */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) .. ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- UNM
 ${N.handlers}[${op(19 /* UNM */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = -${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- NOT
 ${N.handlers}[${op(20 /* NOT */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = not ${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- LEN
 ${N.handlers}[${op(21 /* LEN */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = #${N.frame}.${N.R}[instr[3]]
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- JMP (pc += a)
 ${N.handlers}[${op(22 /* JMP */)}] = function(${N.frame}, pc, instr)
-    return ${N.dispatch}(${N.frame}, pc + instr[2])
+    return pc + instr[2]
 end
 
 -- EQ LT LE (\uAC12 \uC0DD\uC131\uD615 \uBE44\uAD50)
 ${N.handlers}[${op(23 /* EQ */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) == ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(24 /* LT */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) < ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 ${N.handlers}[${op(25 /* LE */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.rk}(${N.frame}, instr[3]) <= ${N.rk}(${N.frame}, instr[4])
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- TEST (if (not R[a]) != (c!=0) then pc += 2 else pc += 1 \u2014 \uBCF4\uD1B5 \uB2E4\uC74C \uBA85\uB839\uC740 JMP)
 ${N.handlers}[${op(26 /* TEST */)}] = function(${N.frame}, pc, instr)
     if (not ${N.frame}.${N.R}[instr[2]]) ~= (instr[4] ~= 0) then
-        return ${N.dispatch}(${N.frame}, pc + 2)
+        return pc + 2
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- CALL
@@ -2942,7 +3010,13 @@ ${N.handlers}[${op(27 /* CALL */)}] = function(${N.frame}, pc, instr)
     end
     local args = table.create(nargs)
     for i = 1, nargs do args[i] = ${N.frame}.${N.R}[a + i] end
-    local rets = table.pack(fn(table.unpack(args, 1, nargs)))
+${debug ? `    if type(fn) ~= "function" then
+        local mt = getmetatable(fn)
+        if not (mt and mt.__call) then
+            error(("[vmdebug] attempt to call a %s value: '%s' (source line %d)"):format(type(fn), tostring(instr[6]), tonumber(instr[5]) or -1), 0)
+        end
+    end
+` : ""}    local rets = table.pack(fn(table.unpack(args, 1, nargs)))
     if c == 1 then
         -- discard
     elseif c == 0 then
@@ -2952,23 +3026,27 @@ ${N.handlers}[${op(27 /* CALL */)}] = function(${N.frame}, pc, instr)
         local want = c - 1
         for i = 1, want do ${N.frame}.${N.R}[a + i - 1] = rets[i] end
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- RETURN
+-- \uB2E4\uB978 \uD578\uB4E4\uB7EC\uB294 "\uB2E4\uC74C pc(\uC22B\uC790)"\uB97C \uBC18\uD658\uD558\uC9C0\uB9CC, RETURN\uB9CC\uC740 \uACB0\uACFC\uAC12\uC744 table.pack\uC73C\uB85C \uC2F8\uC11C
+-- \uD14C\uC774\uBE14\uC744 \uBC18\uD658\uD55C\uB2E4 \u2014 dispatch \uB8E8\uD504\uB294 \uBC18\uD658\uAC12\uC774 \uC22B\uC790\uAC00 \uC544\uB2C8\uBA74 \uC774\uAC78 \uD568\uC218 \uC885\uB8CC \uC2E0\uD638\uB85C \uBCF4\uACE0
+-- table.unpack(next, 1, next.n)\uC73C\uB85C \uD480\uC5B4 \uCD5C\uC885 \uBC18\uD658\uD55C\uB2E4. table.pack\uC774 n\uC744 \uCC44\uC6CC \uC8FC\uBBC0\uB85C
+-- \uC911\uAC04 nil\uC774 \uC788\uC5B4\uB3C4 \uBC18\uD658 \uAC1C\uC218\uAC00 \uC815\uD655\uD788 \uBCF4\uC874\uB41C\uB2E4.
 ${N.handlers}[${op(28 /* RETURN */)}] = function(${N.frame}, pc, instr)
     local a, b = instr[2], instr[3]
     if b == 0 then
-        return table.unpack(${N.frame}.${N.R}, a, (${N.frame}.${N.multiTop} or (a + 1)) - 1)
+        return table.pack(table.unpack(${N.frame}.${N.R}, a, (${N.frame}.${N.multiTop} or (a + 1)) - 1))
     end
-    return table.unpack(${N.frame}.${N.R}, a, a + b - 2)
+    return table.pack(table.unpack(${N.frame}.${N.R}, a, a + b - 2))
 end
 
 -- FORPREP
 ${N.handlers}[${op(29 /* FORPREP */)}] = function(${N.frame}, pc, instr)
     local a = instr[2]
     ${N.frame}.${N.R}[a] = ${N.frame}.${N.R}[a] - ${N.frame}.${N.R}[a + 2]
-    return ${N.dispatch}(${N.frame}, pc + instr[3])
+    return pc + instr[3]
 end
 
 -- FORLOOP
@@ -2984,9 +3062,9 @@ ${N.handlers}[${op(30 /* FORLOOP */)}] = function(${N.frame}, pc, instr)
     end
     if ok then
         ${N.frame}.${N.R}[a + 3] = ${N.frame}.${N.R}[a]
-        return ${N.dispatch}(${N.frame}, pc + instr[3])
+        return pc + instr[3]
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- CLOSURE
@@ -3006,7 +3084,7 @@ ${N.handlers}[${op(31 /* CLOSURE */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = function(...)
         return ${N.execute}(childProto, capturedUpvals, ...)
     end
-    return ${N.dispatch}(${N.frame}, pc + 1 + n)
+    return pc + 1 + n
 end
 
 -- VARARG
@@ -3018,7 +3096,7 @@ ${N.handlers}[${op(32 /* VARARG */)}] = function(${N.frame}, pc, instr)
     if instr[3] == 0 then
         ${N.frame}.${N.multiTop} = instr[2] + count
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 -- SETLIST
@@ -3031,7 +3109,7 @@ ${N.handlers}[${op(33 /* SETLIST */)}] = function(${N.frame}, pc, instr)
     for i = 0, n - 1 do
         tbl[startIdx + i] = ${N.frame}.${N.R}[valuesBase + i]
     end
-    return ${N.dispatch}(${N.frame}, pc + 1)
+    return pc + 1
 end
 
 function ${N.execute}(proto, upvals, ...)
@@ -3120,19 +3198,20 @@ function markRuntimeNumbersAsStructural(body) {
 function runVmify(program, options) {
   const builtinGlobals = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS;
   const random = options.random ?? Math.random;
+  const debug = options.debug ?? false;
   const opcodeMap = createOpcodeMap(random);
   const names = generateVmNames(random);
-  const compiler = new VmCompiler(program, builtinGlobals, opcodeMap);
+  const compiler = new VmCompiler(program, builtinGlobals, opcodeMap, debug);
   const topProto = compiler.compile();
   const usedGlobalNames = compiler.getUsedGlobalNames();
   const globalsTable = table(
     usedGlobalNames.map((name) => namedField(name, identifier(name)))
   );
-  const runtimeSource = buildVmRuntimeSource(names, opcodeMap);
+  const runtimeSource = buildVmRuntimeSource(names, opcodeMap, debug);
   const runtimeProgram = import_luau_parser4.luauparser.parse(runtimeSource);
   const runtimeStatements = runtimeProgram.body.statements;
   markRuntimeNumbersAsStructural(runtimeProgram.body);
-  const protoLiteral = serializeProto(topProto, names);
+  const protoLiteral = serializeProto(topProto, names, debug);
   const newBody = [
     localStatement(names.globals, globalsTable),
     ...runtimeStatements,
