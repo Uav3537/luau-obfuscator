@@ -642,6 +642,12 @@ export class VmCompiler {
             }
         }
 
+        // iterator 표현식이 남긴 임시 레지스터를 반납한다(`a.b` / `a:b()`는 `a`를 담은
+        // 레지스터를 잡아둔 채로 끝난다). 아래 CALL은 top()부터 결과를 쓰고 루프 변수는
+        // declareLocal()로 base+3부터 잡히므로, 여기서 top을 base+3으로 맞추지 않으면
+        // 루프 변수가 한 칸씩 밀려 첫 변수에 `a`가 들어가고 루프가 끝나지 않는다.
+        state.regs.freeTemp(base + 3)
+
         // Luau 제네릭 반복은 iterator 표현식이 함수가 아니라 테이블일 수 있다
         // (플레인 테이블 → array-then-hash 순회, __iter 메타메서드 → 그 결과). base가
         // 함수가 아니면 루프 진입 전에 한 번 정규화한다 — 안 하면 아래 CALL이 테이블을

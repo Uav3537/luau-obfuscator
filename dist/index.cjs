@@ -2310,6 +2310,7 @@ var VmCompiler = class {
         }
       }
     }
+    state.regs.freeTemp(base + 3);
     this.emit(state, 35 /* NORMITER */, base, 0, 0, "normalize-generic-iter");
     const loopStart = state.proto.code.length;
     const nVars = stmt.variables.length;

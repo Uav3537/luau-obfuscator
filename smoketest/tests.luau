@@ -106,6 +106,22 @@ check("string length ascii", #"Roblox", 6)
 check("string.upper", string.upper("mixedCase"), "MIXEDCASE")
 check("string.sub", string.sub("Hello, Roblox!", 1, 5), "Hello")
 
+-- 11) 제네릭 for의 iterator가 `a.b` / `a:b()`일 때 루프 변수가 밀리지 않는지
+--     (예전엔 `a`를 담은 임시 레지스터가 남아 첫 변수에 `a`가 들어가고 루프가 안 끝났음)
+local holder = { items = { "x", "y" } }
+function holder:GetItems() return self.items end
+local memberParts, methodParts = {}, {}
+for i, v in holder.items do
+    if #memberParts > 5 then break end
+    memberParts[#memberParts + 1] = tostring(i) .. "=" .. tostring(v)
+end
+for i, v in holder:GetItems() do
+    if #methodParts > 5 then break end
+    methodParts[#methodParts + 1] = tostring(i) .. "=" .. tostring(v)
+end
+check("generic for over a.b", table.concat(memberParts, ","), "1=x,2=y")
+check("generic for over a:b()", table.concat(methodParts, ","), "1=x,2=y")
+
 print("===== ObfuscationTest end =====")
 
 if failCount == 0 then
