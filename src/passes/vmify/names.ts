@@ -20,6 +20,9 @@ export interface VmNames {
     dispatch: string
     /** local function __vm_rk(frame, x) */
     rk: string
+    /** local function __vm_tableIter(t) — 제네릭 for가 플레인 테이블을 순회할 때 쓰는
+     *  array-then-hash 이터레이터 클로저 팩토리 (NORMITER opcode에서 사용) */
+    tableIter: string
     /** __vm_execute/핸들러의 frame 파라미터 이름 */
     frame: string
     // frame 테이블 필드
@@ -63,6 +66,7 @@ export function generateVmNames(random: () => number = Math.random): VmNames {
     const id = makeIdGenerator(random)
     return {
         globals: id(), protoRoot: id(), execute: id(), handlers: id(), dispatch: id(), rk: id(),
+        tableIter: id(),
         frame: id(),
         R: id(), K: id(), code: id(), protos: id(), upvals: id(), varargs: id(),
         nVarargs: id(), multiTop: id(),

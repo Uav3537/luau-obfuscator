@@ -41,6 +41,10 @@ export enum Opcode {
                  //   생성자 마지막 필드가 Call/MethodCall/Vararg로 다중값을 낼 때 씀 (`{f()}`, `{...}`)
     IDIV,        // R[A] = RK(B) // RK(C)  (Luau 바닥 나눗셈 연산자, 뒤에 추가되어 기존 opcode
                  //   번호를 안 건드림 — enum 중간에 끼워넣으면 runtime.ts의 숫자 인덱스가 전부 밀림)
+    NORMITER,    // 제네릭 for 진입 시 R[A..A+2] 이터레이터 3-튜플을 정규화. R[A]가 함수가
+                 //   아니라 테이블이면(플레인 테이블 or __iter 메타메서드) Luau 제네릭 반복
+                 //   의미대로 (fn, state, ctrl)로 바꿔준다. 안 하면 뒤의 CALL이 테이블을
+                 //   호출하려다 "attempt to call a table value"로 터짐. (enum 끝에 추가)
 }
 
 export interface Instr {

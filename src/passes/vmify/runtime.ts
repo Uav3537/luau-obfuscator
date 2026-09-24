@@ -60,6 +60,34 @@ local function ${N.rk}(${N.frame}, x)
     end
 end
 
+-- 플레인 테이블에 대한 Luau 제네릭 반복(for k, v in t) 이터레이터.
+-- 배열부(1..경계)를 순서대로 먼저, 그다음 해시부(이미 낸 정수 키는 건너뜀)를 낸다.
+-- 상태를 클로저에 담으므로 (fn, state, ctrl) 중 state/ctrl은 안 쓴다.
+local function ${N.tableIter}(t)
+    local i = 0
+    local arrayDone = false
+    local hk = nil
+    return function()
+        if not arrayDone then
+            i = i + 1
+            local v = t[i]
+            if v ~= nil then
+                return i, v
+            end
+            arrayDone = true
+        end
+        local k, v = next(t, hk)
+        while k ~= nil do
+            if type(k) ~= "number" or k ~= math.floor(k) or k < 1 or k >= i then
+                hk = k
+                return k, v
+            end
+            k, v = next(t, k)
+        end
+        return nil
+    end
+end
+
 -- MOVE
 ${N.handlers}[${op(Opcode.MOVE)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]]
@@ -259,6 +287,30 @@ ${N.handlers}[${op(Opcode.RETURN)}] = function(${N.frame}, pc, instr)
         return table.pack(table.unpack(${N.frame}.${N.R}, a, (${N.frame}.${N.multiTop} or (a + 1)) - 1))
     end
     return table.pack(table.unpack(${N.frame}.${N.R}, a, a + b - 2))
+end
+
+-- NORMITER: 제네릭 for 진입 시 이터레이터 3-튜플(R[A..A+2])을 정규화.
+-- R[A]가 함수면 그대로 두고(pairs/ipairs/커스텀 이터레이터), 테이블이면 __iter
+-- 메타메서드가 있으면 그걸 호출해 (fn,state,ctrl)로, 없으면 array-then-hash
+-- 클로저 이터레이터로 바꾼다. 이후 CALL 핸들러가 함수를 정상 호출하게 된다.
+${N.handlers}[${op(Opcode.NORMITER)}] = function(${N.frame}, pc, instr)
+    local a = instr[2]
+    local it = ${N.frame}.${N.R}[a]
+    if type(it) ~= "function" then
+        local mt = getmetatable(it)
+        local customIter = mt and rawget(mt, "__iter")
+        if customIter ~= nil then
+            local f, s, c = customIter(it)
+            ${N.frame}.${N.R}[a] = f
+            ${N.frame}.${N.R}[a + 1] = s
+            ${N.frame}.${N.R}[a + 2] = c
+        elseif type(it) == "table" then
+            ${N.frame}.${N.R}[a] = ${N.tableIter}(it)
+            ${N.frame}.${N.R}[a + 1] = nil
+            ${N.frame}.${N.R}[a + 2] = nil
+        end
+    end
+    return pc + 1
 end
 
 -- FORPREP

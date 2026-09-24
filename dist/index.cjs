@@ -1494,6 +1494,7 @@ var Opcode = /* @__PURE__ */ ((Opcode2) => {
   Opcode2[Opcode2["VARARG"] = 32] = "VARARG";
   Opcode2[Opcode2["SETLIST"] = 33] = "SETLIST";
   Opcode2[Opcode2["IDIV"] = 34] = "IDIV";
+  Opcode2[Opcode2["NORMITER"] = 35] = "NORMITER";
   return Opcode2;
 })(Opcode || {});
 function RK(regOrConstIdx, isConst) {
@@ -2309,6 +2310,7 @@ var VmCompiler = class {
         }
       }
     }
+    this.emit(state, 35 /* NORMITER */, base, 0, 0, "normalize-generic-iter");
     const loopStart = state.proto.code.length;
     const nVars = stmt.variables.length;
     const callBase = state.regs.top();
@@ -2841,6 +2843,34 @@ local function ${N.rk}(${N.frame}, x)
     end
 end
 
+-- \uD50C\uB808\uC778 \uD14C\uC774\uBE14\uC5D0 \uB300\uD55C Luau \uC81C\uB124\uB9AD \uBC18\uBCF5(for k, v in t) \uC774\uD130\uB808\uC774\uD130.
+-- \uBC30\uC5F4\uBD80(1..\uACBD\uACC4)\uB97C \uC21C\uC11C\uB300\uB85C \uBA3C\uC800, \uADF8\uB2E4\uC74C \uD574\uC2DC\uBD80(\uC774\uBBF8 \uB0B8 \uC815\uC218 \uD0A4\uB294 \uAC74\uB108\uB700)\uB97C \uB0B8\uB2E4.
+-- \uC0C1\uD0DC\uB97C \uD074\uB85C\uC800\uC5D0 \uB2F4\uC73C\uBBC0\uB85C (fn, state, ctrl) \uC911 state/ctrl\uC740 \uC548 \uC4F4\uB2E4.
+local function ${N.tableIter}(t)
+    local i = 0
+    local arrayDone = false
+    local hk = nil
+    return function()
+        if not arrayDone then
+            i = i + 1
+            local v = t[i]
+            if v ~= nil then
+                return i, v
+            end
+            arrayDone = true
+        end
+        local k, v = next(t, hk)
+        while k ~= nil do
+            if type(k) ~= "number" or k ~= math.floor(k) or k < 1 or k >= i then
+                hk = k
+                return k, v
+            end
+            k, v = next(t, k)
+        end
+        return nil
+    end
+end
+
 -- MOVE
 ${N.handlers}[${op(0 /* MOVE */)}] = function(${N.frame}, pc, instr)
     ${N.frame}.${N.R}[instr[2]] = ${N.frame}.${N.R}[instr[3]]
@@ -3042,6 +3072,30 @@ ${N.handlers}[${op(28 /* RETURN */)}] = function(${N.frame}, pc, instr)
     return table.pack(table.unpack(${N.frame}.${N.R}, a, a + b - 2))
 end
 
+-- NORMITER: \uC81C\uB124\uB9AD for \uC9C4\uC785 \uC2DC \uC774\uD130\uB808\uC774\uD130 3-\uD29C\uD50C(R[A..A+2])\uC744 \uC815\uADDC\uD654.
+-- R[A]\uAC00 \uD568\uC218\uBA74 \uADF8\uB300\uB85C \uB450\uACE0(pairs/ipairs/\uCEE4\uC2A4\uD140 \uC774\uD130\uB808\uC774\uD130), \uD14C\uC774\uBE14\uC774\uBA74 __iter
+-- \uBA54\uD0C0\uBA54\uC11C\uB4DC\uAC00 \uC788\uC73C\uBA74 \uADF8\uAC78 \uD638\uCD9C\uD574 (fn,state,ctrl)\uB85C, \uC5C6\uC73C\uBA74 array-then-hash
+-- \uD074\uB85C\uC800 \uC774\uD130\uB808\uC774\uD130\uB85C \uBC14\uAFBC\uB2E4. \uC774\uD6C4 CALL \uD578\uB4E4\uB7EC\uAC00 \uD568\uC218\uB97C \uC815\uC0C1 \uD638\uCD9C\uD558\uAC8C \uB41C\uB2E4.
+${N.handlers}[${op(35 /* NORMITER */)}] = function(${N.frame}, pc, instr)
+    local a = instr[2]
+    local it = ${N.frame}.${N.R}[a]
+    if type(it) ~= "function" then
+        local mt = getmetatable(it)
+        local customIter = mt and rawget(mt, "__iter")
+        if customIter ~= nil then
+            local f, s, c = customIter(it)
+            ${N.frame}.${N.R}[a] = f
+            ${N.frame}.${N.R}[a + 1] = s
+            ${N.frame}.${N.R}[a + 2] = c
+        elseif type(it) == "table" then
+            ${N.frame}.${N.R}[a] = ${N.tableIter}(it)
+            ${N.frame}.${N.R}[a + 1] = nil
+            ${N.frame}.${N.R}[a + 2] = nil
+        end
+    end
+    return pc + 1
+end
+
 -- FORPREP
 ${N.handlers}[${op(29 /* FORPREP */)}] = function(${N.frame}, pc, instr)
     local a = instr[2]
@@ -3169,6 +3223,7 @@ function generateVmNames(random = Math.random) {
     handlers: id(),
     dispatch: id(),
     rk: id(),
+    tableIter: id(),
     frame: id(),
     R: id(),
     K: id(),

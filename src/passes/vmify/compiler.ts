@@ -642,6 +642,12 @@ export class VmCompiler {
             }
         }
 
+        // Luau 제네릭 반복은 iterator 표현식이 함수가 아니라 테이블일 수 있다
+        // (플레인 테이블 → array-then-hash 순회, __iter 메타메서드 → 그 결과). base가
+        // 함수가 아니면 루프 진입 전에 한 번 정규화한다 — 안 하면 아래 CALL이 테이블을
+        // 호출하려다 "attempt to call a table value"로 터진다.
+        this.emit(state, Opcode.NORMITER, base, 0, 0, "normalize-generic-iter")
+
         const loopStart = state.proto.code.length
         const nVars = stmt.variables.length
         const callBase = state.regs.top()
