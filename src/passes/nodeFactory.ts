@@ -6,6 +6,7 @@ import type {
     TypedIdentifier, Block, Statement, AssignmentStatement, NumericForStatement,
     ReturnStatement, DoStatement, IfStatement, IfClause, VarargExpression,
     FunctionExpression, BooleanLiteral, NilLiteral, WhileStatement,
+    CallStatement, MethodCallExpression,
 } from "luau-parser"
 
 /** 합성 노드는 실제 소스 위치가 없으므로 0으로 채움(printer는 구조만 봄). */
@@ -114,6 +115,10 @@ export function block(statements: Statement[]): Block {
 
 export function assignmentStatement(targets: Expression[], values: Expression[]): AssignmentStatement {
     return { type: "AssignmentStatement", targets, values, line: POS, column: POS }
+}
+
+export function callStatement(expression: CallExpression | MethodCallExpression): CallStatement {
+    return { type: "CallStatement", expression, line: POS, column: POS }
 }
 
 export function returnStatement(args: Expression[]): ReturnStatement {

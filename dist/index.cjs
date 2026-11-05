@@ -516,6 +516,9 @@ function block(statements) {
 function assignmentStatement(targets, values) {
   return { type: "AssignmentStatement", targets, values, line: POS, column: POS };
 }
+function callStatement(expression) {
+  return { type: "CallStatement", expression, line: POS, column: POS };
+}
 function returnStatement(args) {
   return { type: "ReturnStatement", arguments: args, line: POS, column: POS };
 }
@@ -1105,8 +1108,10 @@ function runConstantArray(program, options) {
 }
 
 // src/passes/EncryptStrings.ts
-var MIN_KEY_LEN = 4;
-var MAX_KEY_LEN = 12;
+var CHUNK_MIN_DEFAULT = 4;
+var CHUNK_MAX_DEFAULT = 9;
+var CONTROL_FLOW_PROBABILITY_DEFAULT3 = 0.7;
+var MAX_CHUNKS_FOR_CONTROL_FLOW = 2e4;
 function randomInt4(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -1190,22 +1195,158 @@ function buildDecoderStatement(name) {
     functionBody([functionParam(dataParam), functionParam(keysParam), functionParam(multParam)], body)
   );
 }
-function runEncryptStrings(program, _options) {
+function splitIntoChunks(bytes, min, max) {
+  const lo = Math.max(1, min);
+  const hi = Math.max(lo, max);
+  const chunks = [];
+  let i = 0;
+  while (i < bytes.length) {
+    const size = randomInt4(lo, hi);
+    chunks.push(bytes.slice(i, i + size));
+    i += size;
+  }
+  return chunks.length > 0 ? chunks : [bytes];
+}
+function shuffledIndices2(n) {
+  const arr = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = randomInt4(0, i);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+function iife3(statements) {
+  return call(paren(functionExpression(functionBody([], block(statements)))), []);
+}
+function buildPlainDataTable(cipherBytes) {
+  return table(cipherBytes.map((b) => positionalField(vmNumberLiteral(b))));
+}
+function buildShuffledTables2(chunks) {
+  const n = chunks.length;
+  const storageOrder = shuffledIndices2(n);
+  const storeVar = randomName3();
+  const orderVar = randomName3();
+  const storeFields = storageOrder.map(
+    (originalIdx) => positionalField(table(chunks[originalIdx].map((b) => positionalField(vmNumberLiteral(b)))))
+  );
+  const order = new Array(n);
+  for (let slot = 0; slot < n; slot++) {
+    order[storageOrder[slot]] = slot + 1;
+  }
+  const orderFields = order.map((slot) => positionalField(vmNumberLiteral(slot)));
+  return {
+    storeVar,
+    orderVar,
+    stmts: [
+      localStatement(storeVar, table(storeFields)),
+      localStatement(orderVar, table(orderFields))
+    ]
+  };
+}
+function buildForLoopDataExpr(chunks) {
+  const { storeVar, orderVar, stmts } = buildShuffledTables2(chunks);
+  const outVar = randomName3();
+  const nVar = randomName3();
+  const iVar = randomName3();
+  const jVar = randomName3();
+  const chVar = randomName3();
+  const innerLoop = numericForStatement(
+    jVar,
+    vmNumberLiteral(1),
+    unary("#", identifier(chVar)),
+    block([
+      assignmentStatement([identifier(nVar)], [binary("+", identifier(nVar), vmNumberLiteral(1))]),
+      assignmentStatement(
+        [index(identifier(outVar), identifier(nVar))],
+        [index(identifier(chVar), identifier(jVar))]
+      )
+    ])
+  );
+  return iife3([
+    ...stmts,
+    localStatement(outVar, table([])),
+    localStatement(nVar, vmNumberLiteral(0)),
+    numericForStatement(
+      iVar,
+      vmNumberLiteral(1),
+      unary("#", identifier(orderVar)),
+      block([
+        localStatement(chVar, index(identifier(storeVar), index(identifier(orderVar), identifier(iVar)))),
+        innerLoop
+      ])
+    ),
+    returnStatement([identifier(outVar)])
+  ]);
+}
+function buildRecursiveDataExpr(chunks) {
+  const { storeVar, orderVar, stmts } = buildShuffledTables2(chunks);
+  const outVar = randomName3();
+  const nVar = randomName3();
+  const recName = randomName3();
+  const iParam = randomName3();
+  const jVar = randomName3();
+  const chVar = randomName3();
+  const innerLoop = numericForStatement(
+    jVar,
+    vmNumberLiteral(1),
+    unary("#", identifier(chVar)),
+    block([
+      assignmentStatement([identifier(nVar)], [binary("+", identifier(nVar), vmNumberLiteral(1))]),
+      assignmentStatement(
+        [index(identifier(outVar), identifier(nVar))],
+        [index(identifier(chVar), identifier(jVar))]
+      )
+    ])
+  );
+  const recBody = block([
+    ifStatement([
+      ifClause(
+        binary(">", identifier(iParam), unary("#", identifier(orderVar))),
+        block([returnStatement([])])
+      )
+    ]),
+    localStatement(chVar, index(identifier(storeVar), index(identifier(orderVar), identifier(iParam)))),
+    innerLoop,
+    returnStatement([call(identifier(recName), [binary("+", identifier(iParam), vmNumberLiteral(1))])])
+  ]);
+  return iife3([
+    ...stmts,
+    localStatement(outVar, table([])),
+    localStatement(nVar, vmNumberLiteral(0)),
+    localFunctionStatement(recName, functionBody([functionParam(iParam)], recBody)),
+    callStatement(call(identifier(recName), [vmNumberLiteral(1)])),
+    returnStatement([identifier(outVar)])
+  ]);
+}
+function buildDataExpr(cipherBytes, options) {
+  const estimatedChunks = Math.ceil(cipherBytes.length / Math.max(1, options.chunkMin));
+  const useControlFlow = cipherBytes.length > 1 && estimatedChunks <= MAX_CHUNKS_FOR_CONTROL_FLOW && Math.random() < options.controlFlowProbability;
+  if (!useControlFlow) return buildPlainDataTable(cipherBytes);
+  const chunks = splitIntoChunks(cipherBytes, options.chunkMin, options.chunkMax);
+  if (chunks.length <= 1) return buildPlainDataTable(cipherBytes);
+  return Math.random() < 0.5 ? buildForLoopDataExpr(chunks) : buildRecursiveDataExpr(chunks);
+}
+function runEncryptStrings(program, options) {
+  const resolved = {
+    chunkMin: options.chunkMin ?? CHUNK_MIN_DEFAULT,
+    chunkMax: options.chunkMax ?? CHUNK_MAX_DEFAULT,
+    controlFlowProbability: options.controlFlowProbability ?? CONTROL_FLOW_PROBABILITY_DEFAULT3
+  };
   const decoderName = randomName3();
   let used = false;
   transformExpressions(program, (expr) => {
     if (expr.type !== "StringLiteral") return;
     if (expr.value.length === 0) return;
     used = true;
-    const keyLen = randomInt4(MIN_KEY_LEN, MAX_KEY_LEN);
+    const keyLen = randomInt4(4, 12);
     const keys = Array.from({ length: keyLen }, () => randomInt4(1, 255));
     const mult = randomInt4(1, 255);
     const plainBytes = toUtf8Bytes2(expr.value);
     const cipherBytes = plainBytes.map((b, idx) => b ^ keystreamByte(keys, mult, idx + 1));
-    const dataTable = table(cipherBytes.map((b) => positionalField(vmNumberLiteral(b))));
+    const dataExpr = buildDataExpr(cipherBytes, resolved);
     const keysTable = table(keys.map((k) => positionalField(obfuscatedNumber(k))));
     const multExpr = obfuscatedNumber(mult);
-    return call(identifier(decoderName), [dataTable, keysTable, multExpr]);
+    return call(identifier(decoderName), [dataExpr, keysTable, multExpr]);
   });
   if (!used) return;
   program.body.statements.unshift(buildDecoderStatement(decoderName));
@@ -1447,8 +1588,8 @@ function runInsertJunk(program, options) {
 function runWrapInFunction(program, _options) {
   const innerBody = program.body;
   const wrapper = functionExpression(functionBody([], innerBody, true));
-  const iife3 = call(paren(wrapper), [vararg()]);
-  program.body = block([returnStatement([iife3])]);
+  const iife4 = call(paren(wrapper), [vararg()]);
+  program.body = block([returnStatement([iife4])]);
 }
 
 // src/passes/Vmify.ts
@@ -3283,9 +3424,14 @@ var PASS_ORDER = [
   "GlobalMapping",
   "RenameVariables",
   "ConstantArray",
+  // EncryptStrings가 StringsToExpressions보다 먼저 와야 한다.
+  // 두 패스 모두 StringLiteral 노드만 변환하는데, 먼저 도는 쪽이 리터럴을 소비한다.
+  // EncryptStrings는 문자열을 암호문 바이트 + 셔플/제어흐름 조립으로 바꿔 원문이
+  // 소스에 전혀 남지 않게 하므로 이쪽을 우선한다. (StringsToExpressions는
+  // EncryptStrings가 꺼졌을 때만 동작하는 평문 string.char 기반 경량 폴백으로 남는다.)
+  "EncryptStrings",
   "StringsToExpressions",
   "NumbersToExpressions",
-  "EncryptStrings",
   "EncryptNumbers",
   "InsertJunk",
   "WrapInFunction",

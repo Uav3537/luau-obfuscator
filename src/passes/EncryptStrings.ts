@@ -1,15 +1,35 @@
-import type { Program, Expression } from "luau-parser"
+import type { Program, Expression, Statement } from "luau-parser"
 import { transformExpressions } from "./walk"
 import {
     identifier, vmNumberLiteral, call, member, index, table, positionalField,
     localFunctionStatement, functionParam, functionBody, block, localStatement,
     assignmentStatement, numericForStatement, returnStatement, unary, binary,
+    functionExpression, paren, ifStatement, ifClause, callStatement,
 } from "./nodeFactory"
 
-export interface EncryptStringsOptions {}
+export interface EncryptStringsOptions {
+    /** 암호화된 바이트를 소스에 흩뿌릴 때 청크 하나의 최소 바이트 수. 기본 4. */
+    chunkMin?: number
+    /** 청크 하나의 최대 바이트 수. 기본 9. */
+    chunkMax?: number
+    /**
+     * 0~1. 암호문 바이트 배열을 소스에 보이는 순서 그대로가 아니라, 청크 단위로
+     * 뒤섞어 저장해두고 for 루프나 재귀 함수로 원래 순서를 되짚어가며 런타임에
+     * 재조립할 확률. 암호문이라 눈으로는 어차피 못 읽지만, 이걸 켜면 배열이
+     * 소스상 연속/정렬된 리터럴로 남지 않아 정적 추적이 한 겹 더 어려워진다.
+     * 기본값 0.7.
+     */
+    controlFlowProbability?: number
+}
 
-const MIN_KEY_LEN = 4
-const MAX_KEY_LEN = 12
+const CHUNK_MIN_DEFAULT = 4
+const CHUNK_MAX_DEFAULT = 9
+const CONTROL_FLOW_PROBABILITY_DEFAULT = 0.7
+
+// 청크 수가 이 상한을 넘기는 거대한 문자열(수 MB짜리 임베드 블롭 등)은 제어흐름
+// 래핑 시 노드가 폭발하므로, 암호화만 적용하고 평문 배열 리터럴(단, 내용은 암호문)로
+// 둔다. StringsToExpressions의 MAX_CHUNKS_PER_STRING과 같은 취지.
+const MAX_CHUNKS_FOR_CONTROL_FLOW = 20000
 
 function randomInt(min: number, max: number): number {
     return Math.floor(Math.random() * (max - min + 1)) + min
@@ -133,7 +153,216 @@ function buildDecoderStatement(name: string) {
     )
 }
 
-export function runEncryptStrings(program: Program, _options: EncryptStringsOptions): void {
+// ---------------------------------------------------------------------------
+// 암호문 바이트 배열을 만드는 쪽. 작은~보통 크기 문자열은 청크로 쪼개 "뒤섞인 순서"로
+// 저장한 뒤, 런타임에 order 테이블을 통해 원래 순서로 재조립해 `data` 배열을 돌려준다.
+// (평문이 아니라 암호문 바이트를 다루므로, StringsToExpressions의 string 조립과 달리
+//  결과물은 string이 아니라 number 배열이다.)
+// ---------------------------------------------------------------------------
+
+function splitIntoChunks(bytes: number[], min: number, max: number): number[][] {
+    const lo = Math.max(1, min)
+    const hi = Math.max(lo, max)
+    const chunks: number[][] = []
+    let i = 0
+    while (i < bytes.length) {
+        const size = randomInt(lo, hi)
+        chunks.push(bytes.slice(i, i + size))
+        i += size
+    }
+    return chunks.length > 0 ? chunks : [bytes]
+}
+
+/** [0, n)의 무작위 순열 (Fisher-Yates) */
+function shuffledIndices(n: number): number[] {
+    const arr = Array.from({ length: n }, (_, i) => i)
+    for (let i = n - 1; i > 0; i--) {
+        const j = randomInt(0, i)
+        ;[arr[i], arr[j]] = [arr[j], arr[i]]
+    }
+    return arr
+}
+
+/** (function() ... end)() — 문(statement)들을 하나의 표현식으로 감싸는 즉시실행 함수. */
+function iife(statements: Statement[]): Expression {
+    return call(paren(functionExpression(functionBody([], block(statements)))), [])
+}
+
+/** 암호문 바이트 배열을 그대로(순서대로) 담은 테이블 리터럴. 거대 문자열용 폴백. */
+function buildPlainDataTable(cipherBytes: number[]): Expression {
+    return table(cipherBytes.map((b) => positionalField(vmNumberLiteral(b))))
+}
+
+/**
+ * 청크들을 뒤섞어 store 테이블에 저장하고, 원래 순서를 가리키는 order 테이블을 따로 둔다.
+ * store[slot] = { 암호문바이트... } (positional 하위 테이블), order[원본청크 인덱스] = slot(1-based).
+ */
+function buildShuffledTables(chunks: number[][]): { storeVar: string; orderVar: string; stmts: Statement[] } {
+    const n = chunks.length
+    const storageOrder = shuffledIndices(n) // storageOrder[slot] = 원본 청크 인덱스
+    const storeVar = randomName()
+    const orderVar = randomName()
+
+    const storeFields = storageOrder.map((originalIdx) =>
+        positionalField(table(chunks[originalIdx].map((b) => positionalField(vmNumberLiteral(b))))),
+    )
+
+    const order = new Array<number>(n)
+    for (let slot = 0; slot < n; slot++) {
+        order[storageOrder[slot]] = slot + 1
+    }
+    const orderFields = order.map((slot) => positionalField(vmNumberLiteral(slot)))
+
+    return {
+        storeVar,
+        orderVar,
+        stmts: [
+            localStatement(storeVar, table(storeFields)),
+            localStatement(orderVar, table(orderFields)),
+        ],
+    }
+}
+
+/**
+ *   (function()
+ *       local store = { ... 뒤섞인 순서의 { 암호문바이트... } 조각들 ... }
+ *       local order = { ... }
+ *       local out = {}
+ *       local n = 0
+ *       for i = 1, #order do
+ *           local ch = store[order[i]]
+ *           for j = 1, #ch do
+ *               n = n + 1
+ *               out[n] = ch[j]
+ *           end
+ *       end
+ *       return out
+ *   end)()
+ */
+function buildForLoopDataExpr(chunks: number[][]): Expression {
+    const { storeVar, orderVar, stmts } = buildShuffledTables(chunks)
+    const outVar = randomName()
+    const nVar = randomName()
+    const iVar = randomName()
+    const jVar = randomName()
+    const chVar = randomName()
+
+    const innerLoop = numericForStatement(
+        jVar,
+        vmNumberLiteral(1),
+        unary("#", identifier(chVar)),
+        block([
+            assignmentStatement([identifier(nVar)], [binary("+", identifier(nVar), vmNumberLiteral(1))]),
+            assignmentStatement(
+                [index(identifier(outVar), identifier(nVar))],
+                [index(identifier(chVar), identifier(jVar))],
+            ),
+        ]),
+    )
+
+    return iife([
+        ...stmts,
+        localStatement(outVar, table([])),
+        localStatement(nVar, vmNumberLiteral(0)),
+        numericForStatement(
+            iVar,
+            vmNumberLiteral(1),
+            unary("#", identifier(orderVar)),
+            block([
+                localStatement(chVar, index(identifier(storeVar), index(identifier(orderVar), identifier(iVar)))),
+                innerLoop,
+            ]),
+        ),
+        returnStatement([identifier(outVar)]),
+    ])
+}
+
+/**
+ *   (function()
+ *       local store = { ... }
+ *       local order = { ... }
+ *       local out = {}
+ *       local n = 0
+ *       local function build(i)
+ *           if i > #order then return end
+ *           local ch = store[order[i]]
+ *           for j = 1, #ch do
+ *               n = n + 1
+ *               out[n] = ch[j]
+ *           end
+ *           return build(i + 1)
+ *       end
+ *       build(1)
+ *       return out
+ *   end)()
+ */
+function buildRecursiveDataExpr(chunks: number[][]): Expression {
+    const { storeVar, orderVar, stmts } = buildShuffledTables(chunks)
+    const outVar = randomName()
+    const nVar = randomName()
+    const recName = randomName()
+    const iParam = randomName()
+    const jVar = randomName()
+    const chVar = randomName()
+
+    const innerLoop = numericForStatement(
+        jVar,
+        vmNumberLiteral(1),
+        unary("#", identifier(chVar)),
+        block([
+            assignmentStatement([identifier(nVar)], [binary("+", identifier(nVar), vmNumberLiteral(1))]),
+            assignmentStatement(
+                [index(identifier(outVar), identifier(nVar))],
+                [index(identifier(chVar), identifier(jVar))],
+            ),
+        ]),
+    )
+
+    const recBody = block([
+        ifStatement([
+            ifClause(
+                binary(">", identifier(iParam), unary("#", identifier(orderVar))),
+                block([returnStatement([])]),
+            ),
+        ]),
+        localStatement(chVar, index(identifier(storeVar), index(identifier(orderVar), identifier(iParam)))),
+        innerLoop,
+        returnStatement([call(identifier(recName), [binary("+", identifier(iParam), vmNumberLiteral(1))])]),
+    ])
+
+    return iife([
+        ...stmts,
+        localStatement(outVar, table([])),
+        localStatement(nVar, vmNumberLiteral(0)),
+        localFunctionStatement(recName, functionBody([functionParam(iParam)], recBody)),
+        callStatement(call(identifier(recName), [vmNumberLiteral(1)])),
+        returnStatement([identifier(outVar)]),
+    ])
+}
+
+function buildDataExpr(cipherBytes: number[], options: Required<EncryptStringsOptions>): Expression {
+    const estimatedChunks = Math.ceil(cipherBytes.length / Math.max(1, options.chunkMin))
+
+    const useControlFlow =
+        cipherBytes.length > 1 &&
+        estimatedChunks <= MAX_CHUNKS_FOR_CONTROL_FLOW &&
+        Math.random() < options.controlFlowProbability
+
+    if (!useControlFlow) return buildPlainDataTable(cipherBytes)
+
+    const chunks = splitIntoChunks(cipherBytes, options.chunkMin, options.chunkMax)
+    if (chunks.length <= 1) return buildPlainDataTable(cipherBytes)
+
+    return Math.random() < 0.5 ? buildForLoopDataExpr(chunks) : buildRecursiveDataExpr(chunks)
+}
+
+export function runEncryptStrings(program: Program, options: EncryptStringsOptions): void {
+    const resolved: Required<EncryptStringsOptions> = {
+        chunkMin: options.chunkMin ?? CHUNK_MIN_DEFAULT,
+        chunkMax: options.chunkMax ?? CHUNK_MAX_DEFAULT,
+        controlFlowProbability: options.controlFlowProbability ?? CONTROL_FLOW_PROBABILITY_DEFAULT,
+    }
+
     const decoderName = randomName()
     let used = false
 
@@ -143,18 +372,18 @@ export function runEncryptStrings(program: Program, _options: EncryptStringsOpti
 
         used = true
 
-        const keyLen = randomInt(MIN_KEY_LEN, MAX_KEY_LEN)
+        const keyLen = randomInt(4, 12)
         const keys = Array.from({ length: keyLen }, () => randomInt(1, 255))
         const mult = randomInt(1, 255)
 
         const plainBytes = toUtf8Bytes(expr.value)
         const cipherBytes = plainBytes.map((b, idx) => b ^ keystreamByte(keys, mult, idx + 1))
 
-        const dataTable = table(cipherBytes.map((b) => positionalField(vmNumberLiteral(b))))
+        const dataExpr = buildDataExpr(cipherBytes, resolved)
         const keysTable = table(keys.map((k) => positionalField(obfuscatedNumber(k))))
         const multExpr = obfuscatedNumber(mult)
 
-        return call(identifier(decoderName), [dataTable, keysTable, multExpr])
+        return call(identifier(decoderName), [dataExpr, keysTable, multExpr])
     })
 
     if (!used) return

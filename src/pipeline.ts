@@ -19,9 +19,14 @@ export const PASS_ORDER: (keyof ObfuscateConfig)[] = [
     "GlobalMapping",
     "RenameVariables",
     "ConstantArray",
+    // EncryptStrings가 StringsToExpressions보다 먼저 와야 한다.
+    // 두 패스 모두 StringLiteral 노드만 변환하는데, 먼저 도는 쪽이 리터럴을 소비한다.
+    // EncryptStrings는 문자열을 암호문 바이트 + 셔플/제어흐름 조립으로 바꿔 원문이
+    // 소스에 전혀 남지 않게 하므로 이쪽을 우선한다. (StringsToExpressions는
+    // EncryptStrings가 꺼졌을 때만 동작하는 평문 string.char 기반 경량 폴백으로 남는다.)
+    "EncryptStrings",
     "StringsToExpressions",
     "NumbersToExpressions",
-    "EncryptStrings",
     "EncryptNumbers",
     "InsertJunk",
     "WrapInFunction",

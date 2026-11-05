@@ -40,6 +40,18 @@ interface GlobalMappingOptions {
 }
 
 interface EncryptStringsOptions {
+    /** 암호화된 바이트를 소스에 흩뿌릴 때 청크 하나의 최소 바이트 수. 기본 4. */
+    chunkMin?: number;
+    /** 청크 하나의 최대 바이트 수. 기본 9. */
+    chunkMax?: number;
+    /**
+     * 0~1. 암호문 바이트 배열을 소스에 보이는 순서 그대로가 아니라, 청크 단위로
+     * 뒤섞어 저장해두고 for 루프나 재귀 함수로 원래 순서를 되짚어가며 런타임에
+     * 재조립할 확률. 암호문이라 눈으로는 어차피 못 읽지만, 이걸 켜면 배열이
+     * 소스상 연속/정렬된 리터럴로 남지 않아 정적 추적이 한 겹 더 어려워진다.
+     * 기본값 0.7.
+     */
+    controlFlowProbability?: number;
 }
 
 interface EncryptNumbersOptions {
