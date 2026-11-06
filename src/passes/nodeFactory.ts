@@ -6,7 +6,7 @@ import type {
     TypedIdentifier, Block, Statement, AssignmentStatement, NumericForStatement,
     ReturnStatement, DoStatement, IfStatement, IfClause, VarargExpression,
     FunctionExpression, BooleanLiteral, NilLiteral, WhileStatement,
-    CallStatement, MethodCallExpression,
+    CallStatement, MethodCallExpression, RepeatStatement,
 } from "luau-parser"
 
 /** 합성 노드는 실제 소스 위치가 없으므로 0으로 채움(printer는 구조만 봄). */
@@ -109,6 +109,18 @@ export function localStatement(name: string, init: Expression): LocalStatement {
     }
 }
 
+/** 초기값 없는 `local a, b, c` 선언. ControlFlowFlattening이 블록 직속 로컬을
+ *  디스패처 위로 호이스팅할 때 사용한다. */
+export function localDeclare(names: string[]): LocalStatement {
+    return {
+        type: "LocalStatement",
+        names: names.map(typedIdentifier),
+        init: [],
+        line: POS,
+        column: POS,
+    }
+}
+
 export function block(statements: Statement[]): Block {
     return { type: "Block", statements, line: POS, column: POS }
 }
@@ -176,6 +188,10 @@ export function ifStatement(clauses: IfClause[], alternate?: Block): IfStatement
 
 export function whileStatement(condition: Expression, body: Block): WhileStatement {
     return { type: "WhileStatement", condition, body, line: POS, column: POS }
+}
+
+export function repeatStatement(body: Block, condition: Expression): RepeatStatement {
+    return { type: "RepeatStatement", body, condition, line: POS, column: POS }
 }
 
 export function vararg(): VarargExpression {

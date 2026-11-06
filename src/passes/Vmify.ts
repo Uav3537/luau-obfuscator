@@ -58,9 +58,15 @@ export interface VmifyOptions {
  * 매 빌드 새로 뽑기 때문에, 컴파일된 청크와 런타임 인터프리터가 산출물마다 구조적으로
  * 달라진다 — "이 VM은 opcode 6이 GETGLOBAL이다" 같은 지식이 다음 빌드에는 안 통함.
  *
- * 주의: 이 패스는 pipeline.ts상 반드시 "가장 먼저"(StripTypes 다음) 실행돼야 한다 —
- * 컴파일이 끝나면 원본 statement/expression 노드 대부분이 바이트코드 숫자로 바뀌어
- * 사라지므로, 이후 패스(RenameVariables, EncryptStrings 등)가 손댈 원본 AST가 없다.
+ * 주의: 컴파일이 끝나면 원본 statement/expression 노드 대부분이 바이트코드 숫자로
+ * 바뀌어 사라지므로, 이름/상수 난독화 패스(RenameVariables, ConstantArray 등)는
+ * 반드시 이 패스 "뒤"에서 돌아야 한다(남은 인터프리터 소스 + proto 리터럴을 대상으로).
+ *
+ * 예외: EncryptStrings / StringsToExpressions는 일부러 이 패스 "앞"에서 돈다.
+ * 그래야 복호 호출과 decoder 본문, 마스터 시드 결합까지 바이트코드로 컴파일되어,
+ * 문자열 풀을 정적 평가하는 것만으로 평문을 복원하는 공격이 막힌다. EncryptStrings는
+ * Vmify가 켜지면 preVm 최소 모드로 돌아(자체 제어흐름 래핑 off) 컴파일 대상 크기를
+ * 억제한다. (pipeline.ts의 PASS_ORDER / preVm 주입 참고.)
  */
 export function runVmify(program: Program, options: VmifyOptions): void {
     const builtinGlobals = options.builtinGlobals ?? DEFAULT_BUILTIN_GLOBALS

@@ -4,6 +4,9 @@ import type { RenameVariablesOptions } from "./passes/RenameVariables"
 import type { GlobalMappingOptions } from "./passes/GlobalMapping"
 import type { EncryptStringsOptions } from "./passes/EncryptStrings"
 import type { EncryptNumbersOptions } from "./passes/EncryptNumbers"
+import type { ControlFlowFlatteningOptions } from "./passes/ControlFlowFlattening"
+import type { OpaquePredicatesOptions } from "./passes/OpaquePredicates"
+import type { ExpressionMBAOptions } from "./passes/ExpressionMBA"
 import { VmifyOptions } from "./passes/Vmify"
 
 export type ObfuscateConfigEach<C> = ({
@@ -16,9 +19,12 @@ export type ObfuscateConfigEach<C> = ({
 // *Options 타입을 그대로 참조한다. 옵션 모양이 바뀌면 패스 파일 하나만 고치면 됨.
 export type ObfuscateConfig = {
     Vmify: ObfuscateConfigEach<VmifyOptions>
+    ControlFlowFlattening: ObfuscateConfigEach<ControlFlowFlatteningOptions>
+    OpaquePredicates: ObfuscateConfigEach<OpaquePredicatesOptions>
     Minify: ObfuscateConfigEach<{}>
     StringsToExpressions: ObfuscateConfigEach<StringsToExpressionsOptions>
     NumbersToExpressions: ObfuscateConfigEach<NumbersToExpressionsOptions>
+    ExpressionMBA: ObfuscateConfigEach<ExpressionMBAOptions>
     EncryptStrings: ObfuscateConfigEach<EncryptStringsOptions>
     EncryptNumbers: ObfuscateConfigEach<EncryptNumbersOptions>
     RenameVariables: ObfuscateConfigEach<RenameVariablesOptions>
@@ -45,9 +51,12 @@ export type ObfuscatePartialConfig = {
 
 export const ObfuscateDefault: ObfuscateConfig = {
     Vmify: { active: true },
+    ControlFlowFlattening: { active: true },
+    OpaquePredicates: { active: true, probability: 0.4, deadBranch: true },
     Minify: { active: true },
     StringsToExpressions: { active: true, min: 5, max: 10 },
     NumbersToExpressions: { active: true, min: 5, max: 10 },
+    ExpressionMBA: { active: true },
     EncryptStrings: { active: true },
     EncryptNumbers: { active: true },
     RenameVariables: { active: true, random: () => "_" + globalThis.crypto.randomUUID().replace(/-/g, "") },

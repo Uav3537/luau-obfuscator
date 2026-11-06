@@ -52,9 +52,44 @@ interface EncryptStringsOptions {
      * 기본값 0.7.
      */
     controlFlowProbability?: number;
+    /**
+     * "VM화 전"에 돌 때 켜는 최소 모드. pipeline이 Vmify가 켜져 있으면 자동으로
+     * 주입한다. 이 패스의 결과(decoder 호출 + 데이터)가 곧바로 Vmify에 의해
+     * 바이트코드로 컴파일되므로:
+     *  - 자체 제어흐름 래핑(셔플/IIFE/재귀 재조립)을 끈다. 제어흐름 은닉은 VM이
+     *    이미 제공하고, 이 기계를 문자열마다 컴파일하면 산출물이 곱셈적으로
+     *    폭발하기 때문(= 원래 키를 VM 옆에 두던 구조의 유일한 실익을 날리는 주범).
+     *  - key/mult/seed를 산술식으로 위장하지 않고 평이한 숫자로 둔다. 어차피 VM
+     *    상수풀의 "그냥 숫자"가 되어 역할을 알 수 없으므로 위장이 불필요하고,
+     *    위장을 빼면 바이트코드가 더 작아진다.
+     */
+    preVm?: boolean;
 }
 
 interface EncryptNumbersOptions {
+}
+
+interface ControlFlowFlatteningOptions {
+    /** 이 개수 미만의 statement만 가진 본문은 평탄화해도 의미가 없으므로 건너뜀. */
+    minStatements?: number;
+    /** 호이스팅할 로컬과 state 변수에 붙일 고유 이름 생성기.
+     *  생략하면 UUID 기반(충돌 불가능)으로 만든다. RenameVariables가 이후에
+     *  한 번 더 이름을 바꿔주긴 하지만, 여기서 이미 "전역적으로 유일"해야
+     *  호이스팅 시 바깥 스코프의 동명 변수를 가리는 일이 없다. */
+    random?: () => string;
+}
+
+interface OpaquePredicatesOptions {
+    /** 감쌀 수 있는 statement 하나를 실제로 감쌀 확률 (0~1). */
+    probability?: number;
+    /** true면 `else`에 절대 실행되지 않는 더미 분기를 붙여 혼란을 키운다. */
+    deadBranch?: boolean;
+}
+
+interface ExpressionMBAOptions {
+    /** 변환 대상 조건을 만족하는 정수 리터럴 하나를 실제로 MBA 식으로 바꿀 확률.
+     *  (0~1) 산출물 크기를 조절한다. 기본 0.6. */
+    probability?: number;
 }
 
 interface VmifyOptions {
@@ -88,9 +123,12 @@ type ObfuscateConfigEach<C> = ({
 };
 type ObfuscateConfig = {
     Vmify: ObfuscateConfigEach<VmifyOptions>;
+    ControlFlowFlattening: ObfuscateConfigEach<ControlFlowFlatteningOptions>;
+    OpaquePredicates: ObfuscateConfigEach<OpaquePredicatesOptions>;
     Minify: ObfuscateConfigEach<{}>;
     StringsToExpressions: ObfuscateConfigEach<StringsToExpressionsOptions>;
     NumbersToExpressions: ObfuscateConfigEach<NumbersToExpressionsOptions>;
+    ExpressionMBA: ObfuscateConfigEach<ExpressionMBAOptions>;
     EncryptStrings: ObfuscateConfigEach<EncryptStringsOptions>;
     EncryptNumbers: ObfuscateConfigEach<EncryptNumbersOptions>;
     RenameVariables: ObfuscateConfigEach<RenameVariablesOptions>;

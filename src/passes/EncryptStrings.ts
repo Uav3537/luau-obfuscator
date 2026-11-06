@@ -20,6 +20,18 @@ export interface EncryptStringsOptions {
      * 기본값 0.7.
      */
     controlFlowProbability?: number
+    /**
+     * "VM화 전"에 돌 때 켜는 최소 모드. pipeline이 Vmify가 켜져 있으면 자동으로
+     * 주입한다. 이 패스의 결과(decoder 호출 + 데이터)가 곧바로 Vmify에 의해
+     * 바이트코드로 컴파일되므로:
+     *  - 자체 제어흐름 래핑(셔플/IIFE/재귀 재조립)을 끈다. 제어흐름 은닉은 VM이
+     *    이미 제공하고, 이 기계를 문자열마다 컴파일하면 산출물이 곱셈적으로
+     *    폭발하기 때문(= 원래 키를 VM 옆에 두던 구조의 유일한 실익을 날리는 주범).
+     *  - key/mult/seed를 산술식으로 위장하지 않고 평이한 숫자로 둔다. 어차피 VM
+     *    상수풀의 "그냥 숫자"가 되어 역할을 알 수 없으므로 위장이 불필요하고,
+     *    위장을 빼면 바이트코드가 더 작아진다.
+     */
+    preVm?: boolean
 }
 
 const CHUNK_MIN_DEFAULT = 4
@@ -69,11 +81,25 @@ function keystreamByte(keys: number[], mult: number, i: number): number {
 }
 
 /**
+ * 프로그램 전역에서 공유하는 32비트 마스터 시드로부터 i번째 위치의 추가
+ * 키스트림 바이트를 뽑는다. 이 바이트는 복호 호출의 "인자"로 들어가지 않고,
+ * 멀리 선언된 seed 변수를 통해서만 들어오므로(decoder의 4번째 인자가 리터럴이
+ * 아니라 식별자 참조), `decoder(상수, 상수, 상수)` 호출 하나만 떼어내 상수
+ * 접기로 평가하려는 공격이 깨진다 — seed라는 자유변수가 비어 있기 때문이다.
+ * (Lua decoder의 동일 식과 반드시 1:1로 맞아야 한다.)
+ */
+function seedByte(seed: number, i: number): number {
+    return (lrotate32(seed, i) ^ i) & 0xFF
+}
+
+/**
  * 숫자 리터럴을 곧이곧대로 노출하지 않고, 산술식/bit32.bxor 호출로 위장한다.
  * "decoder(literal, literal)" 패턴을 그대로 상수 접기(constant fold)하는
  * 단순 정적 분석 스크립트를 무력화하기 위함.
  */
-function obfuscatedNumber(value: number): Expression {
+function obfuscatedNumber(value: number, plain = false): Expression {
+    // preVm 모드: 위장 없이 평이한 숫자. VM 상수풀로 들어가 어차피 역할이 숨겨진다.
+    if (plain) return vmNumberLiteral(value)
     const variant = randomInt(0, 2)
     if (variant === 0) {
         const a = randomInt(0, value)
@@ -90,22 +116,27 @@ function obfuscatedNumber(value: number): Expression {
 
 /**
  * 런타임 디코더를 조립:
- *   local function <name>(data, keys, mult)
+ *   local function <name>(data, keys, mult, seed)
  *       local nKeys = #keys
  *       local out = {}
  *       for i = 1, #data do
  *           local keyByte = keys[((i - 1) % nKeys) + 1]
  *           local mixed = bit32.band(bit32.lrotate(keyByte, i % 8), 0xFF)
  *           local posByte = bit32.band(i * mult, 0xFF)
- *           out[i] = string.char(bit32.bxor(data[i], bit32.bxor(mixed, posByte)))
+ *           local seedByte = bit32.band(bit32.bxor(bit32.lrotate(seed, i % 32), i), 0xFF)
+ *           out[i] = string.char(bit32.bxor(bit32.bxor(data[i], bit32.bxor(mixed, posByte)), seedByte))
  *       end
  *       return table.concat(out)
  *   end
+ *
+ * seed는 호출 지점에 상수로 박히지 않고 멀리 선언된 변수로 넘어온다(keystreamByte
+ * 옆의 seedByte 주석 참고). 그래서 복호 호출은 자기완결적이지 않다.
  */
 function buildDecoderStatement(name: string) {
     const dataParam = randomName()
     const keysParam = randomName()
     const multParam = randomName()
+    const seedParam = randomName()
     const outVar = randomName()
     const iVar = randomName()
     const nKeysVar = randomName()
@@ -125,9 +156,19 @@ function buildDecoderStatement(name: string) {
         vmNumberLiteral(0xFF),
     ])
     const keystream = call(member(identifier("bit32"), "bxor"), [mixed, posByte])
+    const seedMix = call(member(identifier("bit32"), "band"), [
+        call(member(identifier("bit32"), "bxor"), [
+            call(member(identifier("bit32"), "lrotate"), [identifier(seedParam), binary("%", identifier(iVar), vmNumberLiteral(32))]),
+            identifier(iVar),
+        ]),
+        vmNumberLiteral(0xFF),
+    ])
     const finalByte = call(member(identifier("bit32"), "bxor"), [
-        index(identifier(dataParam), identifier(iVar)),
-        keystream,
+        call(member(identifier("bit32"), "bxor"), [
+            index(identifier(dataParam), identifier(iVar)),
+            keystream,
+        ]),
+        seedMix,
     ])
 
     const body = block([
@@ -149,8 +190,17 @@ function buildDecoderStatement(name: string) {
 
     return localFunctionStatement(
         name,
-        functionBody([functionParam(dataParam), functionParam(keysParam), functionParam(multParam)], body),
+        functionBody(
+            [functionParam(dataParam), functionParam(keysParam), functionParam(multParam), functionParam(seedParam)],
+            body,
+        ),
     )
+}
+
+/** 프로그램 전역에서 공유할 마스터 시드를 한 번 선언한다. preVm이면 평이한 숫자,
+ *  아니면 산술식으로 위장. 어느 쪽이든 복호 호출 지점과 "떨어진" 곳에 둔다. */
+function buildSeedStatement(seedVar: string, masterSeed: number, plain: boolean) {
+    return localStatement(seedVar, obfuscatedNumber(masterSeed, plain))
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +391,10 @@ function buildRecursiveDataExpr(chunks: number[][]): Expression {
 }
 
 function buildDataExpr(cipherBytes: number[], options: Required<EncryptStringsOptions>): Expression {
+    // preVm: 제어흐름 래핑을 건너뛰고 평평한 암호문 배열만. (VM이 뒤에서 전체를
+    // 바이트코드로 삼키므로 이 래핑은 중복이고, 컴파일되면 크기 폭발의 원인이 된다.)
+    if (options.preVm) return buildPlainDataTable(cipherBytes)
+
     const estimatedChunks = Math.ceil(cipherBytes.length / Math.max(1, options.chunkMin))
 
     const useControlFlow =
@@ -361,9 +415,13 @@ export function runEncryptStrings(program: Program, options: EncryptStringsOptio
         chunkMin: options.chunkMin ?? CHUNK_MIN_DEFAULT,
         chunkMax: options.chunkMax ?? CHUNK_MAX_DEFAULT,
         controlFlowProbability: options.controlFlowProbability ?? CONTROL_FLOW_PROBABILITY_DEFAULT,
+        preVm: options.preVm ?? false,
     }
 
     const decoderName = randomName()
+    const seedVar = randomName()
+    // 모든 문자열이 공유하는 32비트 마스터 시드. (per-문자열 key/mult는 계속 따로 뽑힘.)
+    const masterSeed = randomInt(1, 0xFFFFFFFF)
     let used = false
 
     transformExpressions(program, (expr: Expression) => {
@@ -377,16 +435,22 @@ export function runEncryptStrings(program: Program, options: EncryptStringsOptio
         const mult = randomInt(1, 255)
 
         const plainBytes = toUtf8Bytes(expr.value)
-        const cipherBytes = plainBytes.map((b, idx) => b ^ keystreamByte(keys, mult, idx + 1))
+        const cipherBytes = plainBytes.map((b, idx) =>
+            (b ^ keystreamByte(keys, mult, idx + 1) ^ seedByte(masterSeed, idx + 1)) & 0xFF)
 
         const dataExpr = buildDataExpr(cipherBytes, resolved)
-        const keysTable = table(keys.map((k) => positionalField(obfuscatedNumber(k))))
-        const multExpr = obfuscatedNumber(mult)
+        const keysTable = table(keys.map((k) => positionalField(obfuscatedNumber(k, resolved.preVm))))
+        const multExpr = obfuscatedNumber(mult, resolved.preVm)
 
-        return call(identifier(decoderName), [dataExpr, keysTable, multExpr])
+        // seed는 리터럴이 아니라 멀리 선언된 변수 참조로 넘긴다 → 호출이 자기완결적이지 않음.
+        return call(identifier(decoderName), [dataExpr, keysTable, multExpr, identifier(seedVar)])
     })
 
     if (!used) return
 
-    program.body.statements.unshift(buildDecoderStatement(decoderName))
+    // seed 선언을 decoder보다 앞(= 더 위)에 두어야 하므로 decoder를 먼저 unshift.
+    program.body.statements.unshift(
+        buildSeedStatement(seedVar, masterSeed, resolved.preVm),
+        buildDecoderStatement(decoderName),
+    )
 }

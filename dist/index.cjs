@@ -27,14 +27,17 @@ __export(index_exports, {
   obfuscateByAst: () => obfuscateByAst
 });
 module.exports = __toCommonJS(index_exports);
-var import_luau_parser5 = require("luau-parser");
+var import_luau_parser6 = require("luau-parser");
 
 // src/config.ts
 var ObfuscateDefault = {
   Vmify: { active: true },
+  ControlFlowFlattening: { active: true },
+  OpaquePredicates: { active: true, probability: 0.4, deadBranch: true },
   Minify: { active: true },
   StringsToExpressions: { active: true, min: 5, max: 10 },
   NumbersToExpressions: { active: true, min: 5, max: 10 },
+  ExpressionMBA: { active: true },
   EncryptStrings: { active: true },
   EncryptNumbers: { active: true },
   RenameVariables: { active: true, random: () => "_" + globalThis.crypto.randomUUID().replace(/-/g, "") },
@@ -510,6 +513,15 @@ function localStatement(name, init) {
     column: POS
   };
 }
+function localDeclare(names) {
+  return {
+    type: "LocalStatement",
+    names: names.map(typedIdentifier),
+    init: [],
+    line: POS,
+    column: POS
+  };
+}
 function block(statements) {
   return { type: "Block", statements, line: POS, column: POS };
 }
@@ -570,6 +582,9 @@ function ifStatement(clauses, alternate) {
 }
 function whileStatement(condition, body) {
   return { type: "WhileStatement", condition, body, line: POS, column: POS };
+}
+function repeatStatement(body, condition) {
+  return { type: "RepeatStatement", body, condition, line: POS, column: POS };
 }
 function vararg() {
   return { type: "VarargExpression", line: POS, column: POS };
@@ -982,7 +997,7 @@ function buildIndexChain(tableName, path) {
 function morphIntoIndexChain(node, tableName, path) {
   const built = buildIndexChain(tableName, path);
   const target = node;
-  for (const k of Object.keys(target)) delete target[k];
+  for (const k2 of Object.keys(target)) delete target[k2];
   Object.assign(target, built);
 }
 function collectUnsafeFunctionDeclGlobals(program, analysis) {
@@ -1066,15 +1081,15 @@ function runConstantArray(program, options) {
   const seen = /* @__PURE__ */ new Set();
   transformExpressions(program, (expr) => {
     if (expr.type === "StringLiteral") {
-      const k = keyOf("string", expr.value);
-      if (!seen.has(k)) {
-        seen.add(k);
+      const k2 = keyOf("string", expr.value);
+      if (!seen.has(k2)) {
+        seen.add(k2);
         order.push({ kind: "string", value: expr.value });
       }
     } else if (expr.type === "NumberLiteral" && !vmStructuralNumbers.has(expr)) {
-      const k = keyOf("number", expr.value);
-      if (!seen.has(k)) {
-        seen.add(k);
+      const k2 = keyOf("number", expr.value);
+      if (!seen.has(k2)) {
+        seen.add(k2);
         order.push({ kind: "number", value: expr.value });
       }
     }
@@ -1134,7 +1149,11 @@ function keystreamByte(keys, mult, i) {
   const posByte = i * mult & 255;
   return (rotated ^ posByte) & 255;
 }
-function obfuscatedNumber(value) {
+function seedByte(seed, i) {
+  return (lrotate32(seed, i) ^ i) & 255;
+}
+function obfuscatedNumber(value, plain = false) {
+  if (plain) return vmNumberLiteral(value);
   const variant = randomInt4(0, 2);
   if (variant === 0) {
     const a2 = randomInt4(0, value);
@@ -1152,6 +1171,7 @@ function buildDecoderStatement(name) {
   const dataParam = randomName3();
   const keysParam = randomName3();
   const multParam = randomName3();
+  const seedParam = randomName3();
   const outVar = randomName3();
   const iVar = randomName3();
   const nKeysVar = randomName3();
@@ -1170,9 +1190,19 @@ function buildDecoderStatement(name) {
     vmNumberLiteral(255)
   ]);
   const keystream = call(member(identifier("bit32"), "bxor"), [mixed, posByte]);
+  const seedMix = call(member(identifier("bit32"), "band"), [
+    call(member(identifier("bit32"), "bxor"), [
+      call(member(identifier("bit32"), "lrotate"), [identifier(seedParam), binary("%", identifier(iVar), vmNumberLiteral(32))]),
+      identifier(iVar)
+    ]),
+    vmNumberLiteral(255)
+  ]);
   const finalByte = call(member(identifier("bit32"), "bxor"), [
-    index(identifier(dataParam), identifier(iVar)),
-    keystream
+    call(member(identifier("bit32"), "bxor"), [
+      index(identifier(dataParam), identifier(iVar)),
+      keystream
+    ]),
+    seedMix
   ]);
   const body = block([
     localStatement(nKeysVar, unary("#", identifier(keysParam))),
@@ -1192,8 +1222,14 @@ function buildDecoderStatement(name) {
   ]);
   return localFunctionStatement(
     name,
-    functionBody([functionParam(dataParam), functionParam(keysParam), functionParam(multParam)], body)
+    functionBody(
+      [functionParam(dataParam), functionParam(keysParam), functionParam(multParam), functionParam(seedParam)],
+      body
+    )
   );
+}
+function buildSeedStatement(seedVar, masterSeed, plain) {
+  return localStatement(seedVar, obfuscatedNumber(masterSeed, plain));
 }
 function splitIntoChunks(bytes, min, max) {
   const lo = Math.max(1, min);
@@ -1319,6 +1355,7 @@ function buildRecursiveDataExpr(chunks) {
   ]);
 }
 function buildDataExpr(cipherBytes, options) {
+  if (options.preVm) return buildPlainDataTable(cipherBytes);
   const estimatedChunks = Math.ceil(cipherBytes.length / Math.max(1, options.chunkMin));
   const useControlFlow = cipherBytes.length > 1 && estimatedChunks <= MAX_CHUNKS_FOR_CONTROL_FLOW && Math.random() < options.controlFlowProbability;
   if (!useControlFlow) return buildPlainDataTable(cipherBytes);
@@ -1330,9 +1367,12 @@ function runEncryptStrings(program, options) {
   const resolved = {
     chunkMin: options.chunkMin ?? CHUNK_MIN_DEFAULT,
     chunkMax: options.chunkMax ?? CHUNK_MAX_DEFAULT,
-    controlFlowProbability: options.controlFlowProbability ?? CONTROL_FLOW_PROBABILITY_DEFAULT3
+    controlFlowProbability: options.controlFlowProbability ?? CONTROL_FLOW_PROBABILITY_DEFAULT3,
+    preVm: options.preVm ?? false
   };
   const decoderName = randomName3();
+  const seedVar = randomName3();
+  const masterSeed = randomInt4(1, 4294967295);
   let used = false;
   transformExpressions(program, (expr) => {
     if (expr.type !== "StringLiteral") return;
@@ -1342,14 +1382,17 @@ function runEncryptStrings(program, options) {
     const keys = Array.from({ length: keyLen }, () => randomInt4(1, 255));
     const mult = randomInt4(1, 255);
     const plainBytes = toUtf8Bytes2(expr.value);
-    const cipherBytes = plainBytes.map((b, idx) => b ^ keystreamByte(keys, mult, idx + 1));
+    const cipherBytes = plainBytes.map((b, idx) => (b ^ keystreamByte(keys, mult, idx + 1) ^ seedByte(masterSeed, idx + 1)) & 255);
     const dataExpr = buildDataExpr(cipherBytes, resolved);
-    const keysTable = table(keys.map((k) => positionalField(obfuscatedNumber(k))));
-    const multExpr = obfuscatedNumber(mult);
-    return call(identifier(decoderName), [dataExpr, keysTable, multExpr]);
+    const keysTable = table(keys.map((k2) => positionalField(obfuscatedNumber(k2, resolved.preVm))));
+    const multExpr = obfuscatedNumber(mult, resolved.preVm);
+    return call(identifier(decoderName), [dataExpr, keysTable, multExpr, identifier(seedVar)]);
   });
   if (!used) return;
-  program.body.statements.unshift(buildDecoderStatement(decoderName));
+  program.body.statements.unshift(
+    buildSeedStatement(seedVar, masterSeed, resolved.preVm),
+    buildDecoderStatement(decoderName)
+  );
 }
 
 // src/passes/EncryptNumbers.ts
@@ -1427,29 +1470,170 @@ function runEncryptNumbers(program, _options) {
   program.body.statements.unshift(buildDecoderStatement2(decoderName));
 }
 
-// src/passes/InsertJunk.ts
+// src/passes/predicates.ts
 function randomInt6(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function p(e) {
+  return paren(e);
+}
+function opaqueTrueExpr() {
+  const v = randomInt6(2, 5e3);
+  const sq = () => p(binary("*", numberLiteral(v), numberLiteral(v)));
+  const templates = [
+    () => binary("==", p(binary("%", p(binary("+", sq(), numberLiteral(v))), numberLiteral(2))), numberLiteral(0)),
+    () => binary("~=", p(binary("%", sq(), numberLiteral(4))), numberLiteral(2)),
+    () => binary("~=", p(binary("%", sq(), numberLiteral(4))), numberLiteral(3)),
+    () => binary("~=", p(binary("%", p(binary("+", sq(), numberLiteral(1))), numberLiteral(7))), numberLiteral(0))
+  ];
+  return templates[randomInt6(0, templates.length - 1)]();
+}
+function opaqueFalseExpr() {
+  const v = randomInt6(2, 5e3);
+  const sq = () => p(binary("*", numberLiteral(v), numberLiteral(v)));
+  const templates = [
+    () => binary("~=", p(binary("%", p(binary("+", sq(), numberLiteral(v))), numberLiteral(2))), numberLiteral(0)),
+    () => binary("==", p(binary("%", sq(), numberLiteral(4))), numberLiteral(2)),
+    () => binary("==", p(binary("%", sq(), numberLiteral(4))), numberLiteral(3)),
+    () => binary("==", p(binary("%", p(binary("+", sq(), numberLiteral(1))), numberLiteral(7))), numberLiteral(0))
+  ];
+  return templates[randomInt6(0, templates.length - 1)]();
+}
+
+// src/passes/InsertJunk.ts
+var LIVE_DEPTH = 2;
+var DEAD_DEPTH = 2;
+function randomInt7(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 function randomName5() {
   return "_" + globalThis.crypto.randomUUID().replace(/-/g, "");
 }
-function junkNumberExpr() {
-  const op = Math.random() < 0.5 ? "+" : "*";
-  return binary(op, numberLiteral(randomInt6(1, 999)), numberLiteral(randomInt6(1, 999)));
+function randomWord() {
+  return "_" + Math.random().toString(36).slice(2, 2 + randomInt7(3, 9));
+}
+function pick(arr) {
+  return arr[randomInt7(0, arr.length - 1)]();
+}
+function liveNumberExpr(depth) {
+  if (depth <= 0) return numberLiteral(randomInt7(1, 999999));
+  const op = ["+", "-", "*"][randomInt7(0, 2)];
+  return binary(op, liveNumberExpr(depth - 1), liveNumberExpr(depth - 1));
+}
+function liveLeaf() {
+  return pick([
+    () => numberLiteral(randomInt7(1, 999999)),
+    () => stringLiteral(randomWord()),
+    () => booleanLiteral(Math.random() < 0.5),
+    () => nilLiteral()
+  ]);
+}
+function liveJunkExpr(depth) {
+  if (depth <= 0) return liveLeaf();
+  return pick([
+    () => liveLeaf(),
+    () => liveNumberExpr(depth),
+    // 테이블 리터럴(필드는 숫자/문자열만 — 생성만 하고 인덱싱 안 하므로 안전).
+    () => table(
+      Array.from({ length: randomInt7(1, 4) }, () => positionalField(Math.random() < 0.5 ? numberLiteral(randomInt7(1, 9999)) : stringLiteral(randomWord())))
+    )
+  ]);
+}
+function deadExpr(depth) {
+  if (depth <= 0) return liveLeaf();
+  return pick([
+    () => liveLeaf(),
+    () => binary(
+      ["+", "-", "*", "/", "%", ".."][randomInt7(0, 5)],
+      deadExpr(depth - 1),
+      deadExpr(depth - 1)
+    ),
+    () => call(identifier(randomName5()), [deadExpr(depth - 1)]),
+    // nil 호출 (dead)
+    () => index(identifier(randomName5()), deadExpr(depth - 1)),
+    // nil 인덱싱 (dead)
+    () => member(identifier(randomName5()), randomWord()),
+    // nil.field (dead)
+    () => unary("#", deadExpr(depth - 1)),
+    // #nil (dead)
+    () => call(
+      member(identifier("string"), "format"),
+      [stringLiteral("%d:%s"), deadExpr(depth - 1), deadExpr(depth - 1)]
+    )
+  ]);
+}
+function deadJunkStatement(depth) {
+  const flat = [
+    () => localStatement(randomName5(), deadExpr(depth)),
+    () => assignmentStatement([identifier(randomName5())], [deadExpr(depth)]),
+    () => callStatement(call(identifier(randomName5()), [deadExpr(depth)])),
+    () => callStatement(call(identifier("error"), [stringLiteral(randomWord())]))
+  ];
+  if (depth <= 0) return pick(flat);
+  const nested = [
+    () => doStatement(block(deadJunkStatements(depth - 1))),
+    () => ifStatement([ifClause(opaqueFalseExpr(), block(deadJunkStatements(depth - 1)))]),
+    () => whileStatement(opaqueFalseExpr(), block(deadJunkStatements(depth - 1)))
+  ];
+  return pick([...flat, ...nested]);
+}
+function deadJunkStatements(depth) {
+  return Array.from({ length: randomInt7(1, 3) }, () => deadJunkStatement(depth));
 }
 function buildJunkStatement() {
-  const variants = [
-    () => localStatement(randomName5(), junkNumberExpr()),
-    () => doStatement(block([localStatement(randomName5(), junkNumberExpr())])),
-    () => ifStatement([
-      ifClause(
-        binary("==", numberLiteral(randomInt6(1, 999)), numberLiteral(randomInt6(1, 999))),
-        block([localStatement(randomName5(), junkNumberExpr())])
-      )
-    ])
-  ];
-  return variants[randomInt6(0, variants.length - 1)]();
+  return pick([
+    // 1
+    () => localStatement(randomName5(), liveJunkExpr(LIVE_DEPTH)),
+    // 2
+    () => doStatement(block([
+      localStatement(randomName5(), liveJunkExpr(LIVE_DEPTH)),
+      localStatement(randomName5(), liveJunkExpr(1))
+    ])),
+    // 3
+    () => ifStatement(
+      [ifClause(opaqueTrueExpr(), block([localStatement(randomName5(), liveJunkExpr(LIVE_DEPTH))]))],
+      Math.random() < 0.5 ? block(deadJunkStatements(1)) : void 0
+    ),
+    // 4
+    () => ifStatement([ifClause(opaqueFalseExpr(), block(deadJunkStatements(DEAD_DEPTH)))]),
+    // 5
+    () => whileStatement(opaqueFalseExpr(), block(deadJunkStatements(DEAD_DEPTH))),
+    // 6
+    () => numericForStatement(
+      randomName5(),
+      numberLiteral(1),
+      numberLiteral(0),
+      block(deadJunkStatements(DEAD_DEPTH))
+    ),
+    // 7
+    () => repeatStatement(
+      block([localStatement(randomName5(), liveJunkExpr(LIVE_DEPTH))]),
+      booleanLiteral(true)
+    ),
+    // 8
+    () => localFunctionStatement(
+      randomName5(),
+      functionBody([functionParam(randomName5())], block(deadJunkStatements(DEAD_DEPTH)))
+    ),
+    // 9
+    () => {
+      const a = randomName5();
+      return doStatement(block([
+        localStatement(a, numberLiteral(randomInt7(1, 9999))),
+        assignmentStatement([identifier(a)], [binary("+", identifier(a), numberLiteral(randomInt7(1, 9999)))])
+      ]));
+    },
+    // 10
+    () => {
+      const f = randomName5();
+      return numericForStatement(
+        f,
+        numberLiteral(1),
+        numberLiteral(randomInt7(1, 3)),
+        block([localStatement(randomName5(), binary("*", identifier(f), numberLiteral(randomInt7(1, 99))))])
+      );
+    }
+  ]);
 }
 function runInsertJunk(program, options) {
   function processExpr(expr) {
@@ -1641,7 +1825,7 @@ var Opcode = /* @__PURE__ */ ((Opcode2) => {
 function RK(regOrConstIdx, isConst) {
   return isConst ? -(regOrConstIdx + 1) : regOrConstIdx;
 }
-var OPCODE_COUNT = Object.keys(Opcode).filter((k) => Number.isNaN(Number(k))).length;
+var OPCODE_COUNT = Object.keys(Opcode).filter((k2) => Number.isNaN(Number(k2))).length;
 function createOpcodeMap(random = Math.random) {
   const perm = Array.from({ length: OPCODE_COUNT }, (_, i) => i);
   for (let i = perm.length - 1; i > 0; i--) {
@@ -1739,7 +1923,7 @@ function buildEnclosingFunctionMap(program) {
     const self = { tag: "fn", node: fb };
     parentOf.set(self, parent);
     mark(fb, self);
-    for (const p of fb.params) mark(p, self);
+    for (const p2 of fb.params) mark(p2, self);
     walkBlock2(fb.body, self);
   }
   function walkExpr(expr, fn) {
@@ -2056,8 +2240,8 @@ var VmCompiler = class {
     const local = state.localSlots.get(bindingId);
     if (local) {
       if (local.boxed) {
-        const k = this.konst(state, BOX_FIELD);
-        this.emit(state, 8 /* GETTABLE */, dest, local.reg, RK(k, true));
+        const k2 = this.konst(state, BOX_FIELD);
+        this.emit(state, 8 /* GETTABLE */, dest, local.reg, RK(k2, true));
       } else if (dest !== local.reg) {
         this.emit(state, 0 /* MOVE */, dest, local.reg, 0);
       }
@@ -2066,8 +2250,8 @@ var VmCompiler = class {
     if (this.bindingIsLocalSomewhereUp(state, bindingId)) {
       const idx = this.getOrCreateUpval(state, bindingId);
       this.emit(state, 4 /* GETUPVAL */, dest, idx, 0);
-      const k = this.konst(state, BOX_FIELD);
-      this.emit(state, 8 /* GETTABLE */, dest, dest, RK(k, true));
+      const k2 = this.konst(state, BOX_FIELD);
+      this.emit(state, 8 /* GETTABLE */, dest, dest, RK(k2, true));
       return;
     }
     const binding = this.analysis.bindings.get(bindingId);
@@ -2078,8 +2262,8 @@ var VmCompiler = class {
     const local = state.localSlots.get(bindingId);
     if (local) {
       if (local.boxed) {
-        const k = this.konst(state, BOX_FIELD);
-        this.emit(state, 9 /* SETTABLE */, local.reg, RK(k, true), src);
+        const k2 = this.konst(state, BOX_FIELD);
+        this.emit(state, 9 /* SETTABLE */, local.reg, RK(k2, true), src);
       } else if (src !== local.reg) {
         this.emit(state, 0 /* MOVE */, local.reg, src, 0);
       }
@@ -2089,8 +2273,8 @@ var VmCompiler = class {
       const idx = this.getOrCreateUpval(state, bindingId);
       const tmp = state.regs.allocTemp();
       this.emit(state, 4 /* GETUPVAL */, tmp, idx, 0);
-      const k = this.konst(state, BOX_FIELD);
-      this.emit(state, 9 /* SETTABLE */, tmp, RK(k, true), src);
+      const k2 = this.konst(state, BOX_FIELD);
+      this.emit(state, 9 /* SETTABLE */, tmp, RK(k2, true), src);
       state.regs.freeTemp(tmp);
       return;
     }
@@ -2251,8 +2435,8 @@ var VmCompiler = class {
     }
     if (target.type === "MemberExpression") {
       const objReg = this.compileExpr(target.object, state);
-      const k = this.konst(state, target.property.name);
-      this.emit(state, 9 /* SETTABLE */, objReg, RK(k, true), srcReg);
+      const k2 = this.konst(state, target.property.name);
+      this.emit(state, 9 /* SETTABLE */, objReg, RK(k2, true), srcReg);
       state.regs.freeTemp(objReg);
       return;
     }
@@ -2293,12 +2477,12 @@ var VmCompiler = class {
     }
     if (target.type === "MemberExpression") {
       const objReg = this.compileExpr(target.object, state);
-      const k = this.konst(state, target.property.name);
+      const k2 = this.konst(state, target.property.name);
       const cur = state.regs.allocTemp();
-      this.emit(state, 8 /* GETTABLE */, cur, objReg, RK(k, true));
+      this.emit(state, 8 /* GETTABLE */, cur, objReg, RK(k2, true));
       const rhs = this.compileExpr(stmt.value, state);
       this.emit(state, op, cur, cur, rhs);
-      this.emit(state, 9 /* SETTABLE */, objReg, RK(k, true), cur);
+      this.emit(state, 9 /* SETTABLE */, objReg, RK(k2, true), cur);
       state.regs.freeTemp(objReg);
       return;
     }
@@ -2333,14 +2517,14 @@ var VmCompiler = class {
     this.emitLoadBinding(state, baseBindingId, objReg);
     const navigateSegments = target.method ? target.path : target.path.slice(0, -1);
     for (const seg of navigateSegments) {
-      const k2 = this.konst(state, seg.name);
+      const k3 = this.konst(state, seg.name);
       const next = state.regs.allocTemp();
-      this.emit(state, 8 /* GETTABLE */, next, objReg, RK(k2, true));
+      this.emit(state, 8 /* GETTABLE */, next, objReg, RK(k3, true));
       objReg = next;
     }
     const finalKeyName = target.method ? target.method.name : target.path[target.path.length - 1].name;
-    const k = this.konst(state, finalKeyName);
-    this.emit(state, 9 /* SETTABLE */, objReg, RK(k, true), fnReg);
+    const k2 = this.konst(state, finalKeyName);
+    this.emit(state, 9 /* SETTABLE */, objReg, RK(k2, true), fnReg);
     state.regs.freeTemp(fnReg);
   }
   compileIf(stmt, state) {
@@ -2356,7 +2540,7 @@ var VmCompiler = class {
       this.patchJump(state, jmpOverBody, state.proto.code.length);
     }
     if (stmt.alternate) this.compileBlock(stmt.alternate, state);
-    for (const p of endPatches) this.patchJump(state, p, state.proto.code.length);
+    for (const p2 of endPatches) this.patchJump(state, p2, state.proto.code.length);
   }
   compileWhile(stmt, state) {
     const loopStart = state.proto.code.length;
@@ -2413,8 +2597,8 @@ var VmCompiler = class {
     if (captured) {
       varReg = state.regs.declareLocal();
       this.emitNewBox(state, varReg);
-      const k = this.konst(state, BOX_FIELD);
-      this.emit(state, 9 /* SETTABLE */, varReg, RK(k, true), cursor);
+      const k2 = this.konst(state, BOX_FIELD);
+      this.emit(state, 9 /* SETTABLE */, varReg, RK(k2, true), cursor);
     } else {
       varReg = cursor;
     }
@@ -2476,8 +2660,8 @@ var VmCompiler = class {
         const boxReg = state.regs.declareLocal();
         state.localSlots.set(bindingId, { reg: boxReg, boxed: true });
         this.emitNewBox(state, boxReg);
-        const k = this.konst(state, BOX_FIELD);
-        this.emit(state, 9 /* SETTABLE */, boxReg, RK(k, true), resultRegs[i]);
+        const k2 = this.konst(state, BOX_FIELD);
+        this.emit(state, 9 /* SETTABLE */, boxReg, RK(k2, true), resultRegs[i]);
       } else {
         state.localSlots.set(bindingId, { reg: resultRegs[i], boxed: false });
       }
@@ -2500,8 +2684,8 @@ var VmCompiler = class {
   }
   loadConst(state, value) {
     const reg = state.regs.allocTemp();
-    const k = this.konst(state, value);
-    this.emit(state, 1 /* LOADK */, reg, k, 0);
+    const k2 = this.konst(state, value);
+    this.emit(state, 1 /* LOADK */, reg, k2, 0);
     return reg;
   }
   patchJump(state, instrIdx, targetIdx) {
@@ -2555,9 +2739,9 @@ var VmCompiler = class {
     }
     if (expr.type === "MethodCallExpression") {
       const objReg = this.compileExpr(expr.object, state);
-      const k = this.konst(state, expr.method.name);
+      const k2 = this.konst(state, expr.method.name);
       const fnSlot = state.regs.allocTemp();
-      this.emit(state, 11 /* SELF */, fnSlot, objReg, RK(k, true));
+      this.emit(state, 11 /* SELF */, fnSlot, objReg, RK(k2, true));
       state.regs.allocTemp();
       const argB = this.compileCallArgsAndGetB(expr.arguments, state, fnSlot + 2);
       const b = argB === 0 ? 0 : expr.arguments.length + 2;
@@ -2592,9 +2776,9 @@ var VmCompiler = class {
     }
     if (expr.type === "MethodCallExpression") {
       const objReg = this.compileExpr(expr.object, state);
-      const k = this.konst(state, expr.method.name);
+      const k2 = this.konst(state, expr.method.name);
       const fnSlot = state.regs.allocTemp();
-      this.emit(state, 11 /* SELF */, fnSlot, objReg, RK(k, true));
+      this.emit(state, 11 /* SELF */, fnSlot, objReg, RK(k2, true));
       state.regs.allocTemp();
       if (fnSlot !== base) {
         this.emit(state, 0 /* MOVE */, base, fnSlot, 0);
@@ -2751,29 +2935,29 @@ var VmCompiler = class {
               state.regs.freeTemp(valuesBase);
             } else {
               const v = this.compileExpr(field.value, state);
-              const k = this.konst(state, posIndex++);
-              this.emit(state, 9 /* SETTABLE */, dest, RK(k, true), v);
+              const k2 = this.konst(state, posIndex++);
+              this.emit(state, 9 /* SETTABLE */, dest, RK(k2, true), v);
               state.regs.freeTemp(v);
             }
           } else if (field.type === "TableFieldNamed") {
             const v = this.compileExpr(field.value, state);
-            const k = this.konst(state, field.name.name);
-            this.emit(state, 9 /* SETTABLE */, dest, RK(k, true), v);
+            const k2 = this.konst(state, field.name.name);
+            this.emit(state, 9 /* SETTABLE */, dest, RK(k2, true), v);
             state.regs.freeTemp(v);
           } else {
-            const k = this.compileExpr(field.key, state);
+            const k2 = this.compileExpr(field.key, state);
             const v = this.compileExpr(field.value, state);
-            this.emit(state, 9 /* SETTABLE */, dest, k, v);
-            state.regs.freeTemp(k);
+            this.emit(state, 9 /* SETTABLE */, dest, k2, v);
+            state.regs.freeTemp(k2);
           }
         }
         return dest;
       }
       case "MemberExpression": {
         const objReg = this.compileExpr(expr.object, state);
-        const k = this.konst(state, expr.property.name);
+        const k2 = this.konst(state, expr.property.name);
         const dest = state.regs.allocTemp();
-        this.emit(state, 8 /* GETTABLE */, dest, objReg, RK(k, true));
+        this.emit(state, 8 /* GETTABLE */, dest, objReg, RK(k2, true));
         state.regs.freeTemp(dest + 1);
         return dest;
       }
@@ -2795,9 +2979,9 @@ var VmCompiler = class {
       }
       case "MethodCallExpression": {
         const objReg = this.compileExpr(expr.object, state);
-        const k = this.konst(state, expr.method.name);
+        const k2 = this.konst(state, expr.method.name);
         const fnSlot = state.regs.allocTemp();
-        this.emit(state, 11 /* SELF */, fnSlot, objReg, RK(k, true));
+        this.emit(state, 11 /* SELF */, fnSlot, objReg, RK(k2, true));
         state.regs.allocTemp();
         const argB = this.compileCallArgsAndGetB(expr.arguments, state, fnSlot + 2);
         const b = argB === 0 ? 0 : expr.arguments.length + 2;
@@ -2850,7 +3034,7 @@ var VmCompiler = class {
         const altReg = this.compileExpr(expr.alternate, state);
         if (altReg !== dest) this.emit(state, 0 /* MOVE */, dest, altReg, 0);
         state.regs.freeTemp(dest + 1);
-        for (const p of endPatches) this.patchJump(state, p, state.proto.code.length);
+        for (const p2 of endPatches) this.patchJump(state, p2, state.proto.code.length);
         return dest;
       }
       default: {
@@ -2889,8 +3073,8 @@ var VmCompiler = class {
       if (this.captured.has(bindingId)) {
         const boxReg = child.regs.declareLocal();
         this.emitNewBox(child, boxReg);
-        const k = this.konst(child, BOX_FIELD);
-        this.emit(child, 9 /* SETTABLE */, boxReg, RK(k, true), naturalRegs[i]);
+        const k2 = this.konst(child, BOX_FIELD);
+        this.emit(child, 9 /* SETTABLE */, boxReg, RK(k2, true), naturalRegs[i]);
         child.localSlots.set(bindingId, { reg: boxReg, boxed: true });
       } else {
         child.localSlots.set(bindingId, { reg: naturalRegs[i], boxed: false });
@@ -2948,7 +3132,7 @@ function serializeProto(proto, names, debug = false) {
     namedField(names.code, serializeInstrs(proto, debug)),
     namedField(names.consts, serializeConsts(proto.consts)),
     namedField(names.upvalDescs, serializeUpvalDescs(proto, names)),
-    namedField(names.protos, table(proto.protos.map((p) => positionalField(serializeProto(p, names, debug)))))
+    namedField(names.protos, table(proto.protos.map((p2) => positionalField(serializeProto(p2, names, debug)))))
   ];
   return table(fields);
 }
@@ -3418,19 +3602,365 @@ function runVmify(program, options) {
   program.body.statements = newBody;
 }
 
+// src/passes/ControlFlowFlattening.ts
+var import_luau_parser5 = require("luau-parser");
+function randomInt8(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function distinctInts(count) {
+  const seen = /* @__PURE__ */ new Set();
+  while (seen.size < count) seen.add(randomInt8(1e3, 9e6));
+  return [...seen];
+}
+function runControlFlowFlattening(program, options) {
+  const minStatements = options.minStatements ?? 3;
+  const makeName = options.random ?? (() => "_" + globalThis.crypto.randomUUID().replace(/-/g, ""));
+  const analysis = (0, import_luau_parser5.analyzeScopes)(program);
+  const declToBinding = /* @__PURE__ */ new Map();
+  for (const b of analysis.bindings.values()) {
+    if (b.declarationNode) declToBinding.set(b.declarationNode, b);
+  }
+  const bodies = [program.body];
+  transformExpressions(program, (e) => {
+    if (e.type === "FunctionExpression") bodies.push(e.func.body);
+    return void 0;
+  });
+  function collectDeclaredFunctions(b) {
+    for (const s of b.statements) {
+      switch (s.type) {
+        case "LocalFunctionStatement":
+        case "FunctionDeclarationStatement":
+          bodies.push(s.func.body);
+          collectDeclaredFunctions(s.func.body);
+          break;
+        case "DoStatement":
+        case "WhileStatement":
+        case "RepeatStatement":
+        case "NumericForStatement":
+        case "GenericForStatement":
+          collectDeclaredFunctions(s.body);
+          break;
+        case "IfStatement":
+          for (const c of s.clauses) collectDeclaredFunctions(c.body);
+          if (s.alternate) collectDeclaredFunctions(s.alternate);
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  collectDeclaredFunctions(program.body);
+  for (const body of bodies) flattenBody(body);
+  function flattenBody(body) {
+    const stmts = body.statements;
+    if (stmts.length < minStatements) return;
+    const declNodes = [];
+    for (const s of stmts) {
+      if (s.type === "LocalStatement") {
+        if (s.isConst) return;
+        declNodes.push(...s.names);
+      } else if (s.type === "LocalFunctionStatement") {
+        if (s.isConst || s.attributes && s.attributes.length > 0) return;
+        declNodes.push(s.name);
+      }
+    }
+    const bindings = [];
+    for (const node of declNodes) {
+      const binding = declToBinding.get(node);
+      if (!binding) return;
+      bindings.push(binding);
+    }
+    for (const binding of bindings) {
+      const newName = makeName();
+      binding.name = newName;
+      if (binding.declarationNode) binding.declarationNode.name = newName;
+      for (const ref of binding.references) ref.name = newName;
+    }
+    const hoistNames = [];
+    const transformed = [];
+    for (const s of stmts) {
+      if (s.type === "LocalStatement") {
+        const names = s.names.map((n2) => n2.name);
+        hoistNames.push(...names);
+        if (s.init.length === 0) transformed.push(null);
+        else transformed.push(assignmentStatement(names.map(identifier), s.init));
+      } else if (s.type === "LocalFunctionStatement") {
+        hoistNames.push(s.name.name);
+        transformed.push(assignmentStatement(
+          [identifier(s.name.name)],
+          [functionExpression(s.func)]
+        ));
+      } else {
+        transformed.push(s);
+      }
+    }
+    const n = transformed.length;
+    const ids = distinctInts(n + 1);
+    const stateIds = ids.slice(0, n);
+    const terminal = ids[n];
+    const stateVar = makeName();
+    const clauses = transformed.map((t, i) => {
+      const bodyStmts = [];
+      if (t !== null) bodyStmts.push(t);
+      const isReturn = t !== null && t.type === "ReturnStatement";
+      if (!isReturn) {
+        const next = i < n - 1 ? stateIds[i + 1] : terminal;
+        bodyStmts.push(assignmentStatement([identifier(stateVar)], [numberLiteral(next)]));
+      }
+      return ifClause(
+        binary("==", identifier(stateVar), numberLiteral(stateIds[i])),
+        block(bodyStmts)
+      );
+    });
+    const dispatcher = whileStatement(
+      binary("~=", identifier(stateVar), numberLiteral(terminal)),
+      block([ifStatement(clauses)])
+    );
+    const newStmts = [];
+    if (hoistNames.length > 0) newStmts.push(localDeclare(hoistNames));
+    newStmts.push(localStatement(stateVar, numberLiteral(stateIds[0])));
+    newStmts.push(dispatcher);
+    body.statements = newStmts;
+  }
+}
+
+// src/passes/OpaquePredicates.ts
+function randomInt9(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function randomName6() {
+  return "_" + globalThis.crypto.randomUUID().replace(/-/g, "");
+}
+function deadStatement() {
+  const op = Math.random() < 0.5 ? "+" : "*";
+  return localStatement(
+    randomName6(),
+    binary(op, numberLiteral(randomInt9(1, 999)), numberLiteral(randomInt9(1, 999)))
+  );
+}
+function isWrappable(stmt) {
+  switch (stmt.type) {
+    case "LocalStatement":
+    case "LocalFunctionStatement":
+    case "TypeAliasStatement":
+    case "ExportTypeAliasStatement":
+      return false;
+    default:
+      return true;
+  }
+}
+function runOpaquePredicates(program, options) {
+  const probability = options.probability ?? 0.4;
+  const deadBranch = options.deadBranch ?? true;
+  function wrap(stmt) {
+    const clause = ifClause(opaqueTrueExpr(), block([stmt]));
+    return deadBranch ? ifStatement([clause], block([deadStatement()])) : ifStatement([clause]);
+  }
+  function processExpr(expr) {
+    switch (expr.type) {
+      case "InterpolatedStringExpression":
+        for (const part of expr.parts) {
+          if (part.kind === "expression") processExpr(part.expression);
+        }
+        return;
+      case "FunctionExpression":
+        processBlock(expr.func.body);
+        return;
+      case "TableExpression":
+        for (const field of expr.fields) {
+          if (field.type === "TableFieldPositional") processExpr(field.value);
+          else if (field.type === "TableFieldNamed") processExpr(field.value);
+          else {
+            processExpr(field.key);
+            processExpr(field.value);
+          }
+        }
+        return;
+      case "BinaryExpression":
+        processExpr(expr.left);
+        processExpr(expr.right);
+        return;
+      case "UnaryExpression":
+        processExpr(expr.argument);
+        return;
+      case "MemberExpression":
+        processExpr(expr.object);
+        return;
+      case "IndexExpression":
+        processExpr(expr.object);
+        processExpr(expr.index);
+        return;
+      case "CallExpression":
+        processExpr(expr.callee);
+        expr.arguments.forEach(processExpr);
+        return;
+      case "MethodCallExpression":
+        processExpr(expr.object);
+        expr.arguments.forEach(processExpr);
+        return;
+      case "ParenthesizedExpression":
+        processExpr(expr.expression);
+        return;
+      case "TypeAssertionExpression":
+        processExpr(expr.expression);
+        return;
+      case "IfElseExpression":
+        for (const clause of expr.clauses) {
+          processExpr(clause.condition);
+          processExpr(clause.body);
+        }
+        processExpr(expr.alternate);
+        return;
+      default:
+        return;
+    }
+  }
+  function processStatement(stmt) {
+    switch (stmt.type) {
+      case "LocalStatement":
+        stmt.init.forEach(processExpr);
+        return;
+      case "LocalFunctionStatement":
+        processBlock(stmt.func.body);
+        return;
+      case "FunctionDeclarationStatement":
+        processBlock(stmt.func.body);
+        return;
+      case "AssignmentStatement":
+        stmt.targets.forEach(processExpr);
+        stmt.values.forEach(processExpr);
+        return;
+      case "CompoundAssignmentStatement":
+        processExpr(stmt.target);
+        processExpr(stmt.value);
+        return;
+      case "CallStatement":
+        processExpr(stmt.expression);
+        return;
+      case "DoStatement":
+        processBlock(stmt.body);
+        return;
+      case "WhileStatement":
+        processExpr(stmt.condition);
+        processBlock(stmt.body);
+        return;
+      case "RepeatStatement":
+        processBlock(stmt.body);
+        processExpr(stmt.condition);
+        return;
+      case "IfStatement":
+        for (const clause of stmt.clauses) {
+          processExpr(clause.condition);
+          processBlock(clause.body);
+        }
+        if (stmt.alternate) processBlock(stmt.alternate);
+        return;
+      case "NumericForStatement":
+        processExpr(stmt.start);
+        processExpr(stmt.end);
+        if (stmt.step) processExpr(stmt.step);
+        processBlock(stmt.body);
+        return;
+      case "GenericForStatement":
+        stmt.iterators.forEach(processExpr);
+        processBlock(stmt.body);
+        return;
+      case "ReturnStatement":
+        stmt.arguments.forEach(processExpr);
+        return;
+      default:
+        return;
+    }
+  }
+  function processBlock(blk) {
+    for (const stmt of blk.statements) processStatement(stmt);
+    blk.statements = blk.statements.map((stmt) => isWrappable(stmt) && Math.random() < probability ? wrap(stmt) : stmt);
+  }
+  processBlock(program.body);
+}
+
+// src/passes/ExpressionMBA.ts
+var UINT32_MAX2 = 4294967295;
+var PROBABILITY_DEFAULT = 0.6;
+function randomInt10(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function bit32(fn, args) {
+  return call(member(identifier("bit32"), fn), args);
+}
+function k(value) {
+  return vmNumberLiteral(value);
+}
+function encodeMBA(value) {
+  const variant = randomInt10(0, 2);
+  if (variant === 0) {
+    const a2 = randomInt10(0, value);
+    const b = value - a2;
+    return binary(
+      "+",
+      bit32("bxor", [k(a2), k(b)]),
+      binary("*", k(2), bit32("band", [k(a2), k(b)]))
+    );
+  }
+  if (variant === 1) {
+    const a2 = randomInt10(0, value);
+    const b = value - a2;
+    return binary(
+      "+",
+      bit32("bor", [k(a2), k(b)]),
+      bit32("band", [k(a2), k(b)])
+    );
+  }
+  const a = randomInt10(value, UINT32_MAX2);
+  const c = a - value;
+  return binary(
+    "-",
+    bit32("bxor", [k(a), k(c)]),
+    binary("*", k(2), bit32("band", [bit32("bnot", [k(a)]), k(c)]))
+  );
+}
+function isEligible(value) {
+  return Number.isInteger(value) && value >= 0 && value <= UINT32_MAX2;
+}
+function runExpressionMBA(program, options) {
+  const probability = options.probability ?? PROBABILITY_DEFAULT;
+  transformExpressions(program, (expr) => {
+    if (expr.type !== "NumberLiteral") return;
+    if (vmStructuralNumbers.has(expr)) return;
+    if (!isEligible(expr.value)) return;
+    if (Math.random() >= probability) return;
+    return encodeMBA(expr.value);
+  });
+}
+
 // src/pipeline.ts
 var PASS_ORDER = [
+  // 문자열 암호화는 Vmify "앞"에서 돈다. 그래야 복호 호출(decoder(...))과
+  // decoder 본문, 마스터 시드 결합까지 Vmify가 바이트코드로 삼켜서, 공격자가
+  // VM을 에뮬레이트하지 않고 문자열 풀만 정적 평가해 평문을 복원하는 길이
+  // 막힌다. (Vmify가 켜져 있으면 runPipeline이 EncryptStrings에 preVm을 주입해
+  // 자체 제어흐름 래핑을 끈다 — 그 래핑까지 컴파일되면 산출물이 폭발하므로.)
+  //
+  // EncryptStrings가 StringsToExpressions보다 먼저 와야 한다.
+  // 두 패스 모두 StringLiteral 노드만 변환하는데, 먼저 도는 쪽이 리터럴을 소비한다.
+  // EncryptStrings는 문자열을 암호문 바이트로 바꿔 원문이 소스에 전혀 남지 않게
+  // 하므로 이쪽을 우선한다. (StringsToExpressions는 EncryptStrings가 꺼졌을 때만
+  // 동작하는 평문 string.char 기반 경량 폴백으로 남는다.)
+  "EncryptStrings",
+  "StringsToExpressions",
   "Vmify",
+  // 구조 변형(제어 흐름)은 이름/상수 난독화보다 먼저 돌린다. 여기서 새로
+  // 생기는 숫자(state 번호, opaque predicate 상수)는 뒤쪽 숫자 패스가 다시
+  // 표현식으로 부풀려 숨기고, state 변수/호이스팅 로컬은 RenameVariables가
+  // 한 번 더 이름을 바꿔준다.
+  "ControlFlowFlattening",
+  "OpaquePredicates",
   "GlobalMapping",
   "RenameVariables",
   "ConstantArray",
-  // EncryptStrings가 StringsToExpressions보다 먼저 와야 한다.
-  // 두 패스 모두 StringLiteral 노드만 변환하는데, 먼저 도는 쪽이 리터럴을 소비한다.
-  // EncryptStrings는 문자열을 암호문 바이트 + 셔플/제어흐름 조립으로 바꿔 원문이
-  // 소스에 전혀 남지 않게 하므로 이쪽을 우선한다. (StringsToExpressions는
-  // EncryptStrings가 꺼졌을 때만 동작하는 평문 string.char 기반 경량 폴백으로 남는다.)
-  "EncryptStrings",
-  "StringsToExpressions",
+  // ExpressionMBA는 다른 숫자 패스보다 먼저 돈다 — 출력 상수를 structural로
+  // 찍으므로 뒤의 NumbersToExpressions/EncryptNumbers가 그 값들을 건너뛴다.
+  "ExpressionMBA",
   "NumbersToExpressions",
   "EncryptNumbers",
   "InsertJunk",
@@ -3447,7 +3977,10 @@ var PASS_MAP = {
   EncryptNumbers: runEncryptNumbers,
   InsertJunk: runInsertJunk,
   WrapInFunction: runWrapInFunction,
-  Vmify: runVmify
+  Vmify: runVmify,
+  ControlFlowFlattening: runControlFlowFlattening,
+  OpaquePredicates: runOpaquePredicates,
+  ExpressionMBA: runExpressionMBA
 };
 function runPipeline(program, config) {
   runStripTypes(program);
@@ -3457,6 +3990,10 @@ function runPipeline(program, config) {
     const pass = PASS_MAP[key];
     if (!pass) continue;
     const { active, ...options } = feature;
+    if (key === "EncryptStrings" && config.Vmify.active) {
+      ;
+      options.preVm = true;
+    }
     pass(program, options);
   }
 }
@@ -3470,11 +4007,11 @@ function minifyPrinted(code) {
 function obfuscateByAst(program, PConfig) {
   const config = mergeConfig(ObfuscateDefault, PConfig ?? {});
   runPipeline(program, config);
-  const printed = import_luau_parser5.luauparser.print(program);
+  const printed = import_luau_parser6.luauparser.print(program);
   return config.Minify.active ? minifyPrinted(printed) : printed;
 }
 function obfuscate(source, PConfig) {
-  const program = import_luau_parser5.luauparser.parse(source);
+  const program = import_luau_parser6.luauparser.parse(source);
   return obfuscateByAst(program, PConfig);
 }
 // Annotate the CommonJS export names for ESM import in node:
